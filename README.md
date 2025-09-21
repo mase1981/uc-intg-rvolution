@@ -435,8 +435,4 @@ python r_volution_simulator.py --single --type amlogic --port 8080
 
 **Made with ❤️ for the Unfolded Circle Community** 
 
-<<<<<<< HEAD
 **Thank You**: Meir Miyara
-=======
-**Thank You**: Meir Miyara
->>>>>>> 441245fa880724bb3723b038c2114307f227a354
