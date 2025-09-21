@@ -1,0 +1,10 @@
+services:
+  uc-intg-rvolution:
+    image: ghcr.io/mase1981/uc-intg-rvolution:latest
+    container_name: uc-intg-rvolution
+    network_mode: host
+    volumes:
+      - </local/path>:/config
+    environment:
+      - UC_INTEGRATION_HTTP_PORT=9090
+    restart: unless-stopped

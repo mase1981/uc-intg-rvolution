@@ -1,0 +1,45 @@
+{
+  "driver_id": "uc_intg_rvolution",
+  "version": "1.0.0",
+  "min_core_api": "0.21.0",
+  "name": {
+    "en": "R_Volution Players"
+  },
+  "description": {
+    "en": "Integration for R_volution media players supporting both Amlogic (PlayerOne 8K, Pro 8K, Mini) and R_volution Player devices via IP control with comprehensive remote functionality"
+  },
+  "icon": "uc:music",
+  "developer": {
+    "name": "Meir Miyara",
+    "email": "meir.miyara@gmail.com"
+  },
+  "home_page": "https://github.com/mase1981/uc-intg-rvolution",
+  "documentation": "https://github.com/mase1981/uc-intg-rvolution/blob/main/README.md",
+  "setup_data_schema": {
+    "title": {
+      "en": "R_volution Device Setup"
+    },
+    "description": {
+      "en": "Configure your R_volution devices. Start by selecting how many devices you want to set up."
+    },
+    "settings": [
+      {
+        "id": "device_count",
+        "label": {
+          "en": "Number of Devices"
+        },
+        "description": {
+          "en": "How many R_volution devices do you want to configure?"
+        },
+        "field": {
+          "number": {
+            "value": 1,
+            "min": 1,
+            "max": 10
+          }
+        }
+      }
+    ]
+  },
+  "release_date": "2025-01-01"
+}
