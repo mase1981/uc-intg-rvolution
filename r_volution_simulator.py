@@ -26,13 +26,11 @@ logger = logging.getLogger(__name__)
 
 
 class DeviceType(Enum):
-    """R_volution device types."""
-    AMLOGIC = "amlogic"  # PlayerOne 8K, Pro 8K, Mini
-    PLAYER = "player"    # R_volution Players
+    AMLOGIC = "amlogic"
+    PLAYER = "player"
 
 
 def get_local_ip() -> str:
-    """Get the local IP address of the machine."""
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             s.connect(("8.8.8.8", 80))
@@ -42,11 +40,9 @@ def get_local_ip() -> str:
 
 
 class RvolutionSimulator:
-    """Simulates an R_volution media player device."""
     
     def __init__(self, host: str = None, port: int = 8080, device_name: str = "R_volution-SIM", 
                  device_id: int = 1, device_type: DeviceType = DeviceType.AMLOGIC):
-        """Initialize the simulator."""
         self.host = host if host else get_local_ip()
         self.port = port
         self.device_name = device_name
@@ -54,7 +50,6 @@ class RvolutionSimulator:
         self.device_type = device_type
         self.app = web.Application()
         
-        # Device state
         self.device_state = {
             "power": "on",
             "volume": 50 + (device_id * 5),
@@ -63,7 +58,7 @@ class RvolutionSimulator:
             "input": "hdmi1",
             "playback": "stop",
             "position": 0,
-            "duration": 7200,  # 2 hours in seconds
+            "duration": 7200,
             "title": f"Demo Movie {device_id}",
             "subtitle_enabled": False,
             "audio_track": "main",
@@ -71,7 +66,6 @@ class RvolutionSimulator:
             "repeat": False
         }
         
-        # Device info based on type
         if device_type == DeviceType.AMLOGIC:
             self.device_info = {
                 "model_name": f"PlayerOne-8K-SIM-{device_id}",
@@ -98,7 +92,6 @@ class RvolutionSimulator:
         self._start_position_update()
         
     def _get_amlogic_ir_codes(self) -> Dict[str, str]:
-        """Get IR codes for Amlogic devices."""
         return {
             "3D": "ED124040",
             "Audio": "E6194040",
@@ -155,7 +148,6 @@ class RvolutionSimulator:
         }
     
     def _get_player_ir_codes(self) -> Dict[str, str]:
-        """Get IR codes for R_volution Player devices."""
         return {
             "3D": "EC124040",
             "Audio": "EC194040",
@@ -213,27 +205,16 @@ class RvolutionSimulator:
         }
         
     def _setup_routes(self):
-        """Set up HTTP routes for R_volution API."""
-        # Root endpoint
         self.app.router.add_get('/', self.handle_root)
-        
-        # Main IR control endpoint - matches R_volution API
         self.app.router.add_get('/cgi-bin/do', self.handle_ir_command)
-        
-        # Device info endpoints
         self.app.router.add_get('/device/info', self.get_device_info)
         self.app.router.add_get('/device/status', self.get_device_status)
-        
-        # Debug endpoints
         self.app.router.add_get('/debug/state', self.debug_state)
         self.app.router.add_get('/debug/reset', self.debug_reset)
         self.app.router.add_get('/debug/ir_codes', self.debug_ir_codes)
-        
-        # Health check
         self.app.router.add_get('/health', self.health_check)
     
     async def handle_root(self, request: Request) -> Response:
-        """Handle root endpoint."""
         return web.json_response({
             "message": f"R_volution {self.device_type.value.title()} Simulator {self.device_id}",
             "device_id": self.device_info["device_id"],
@@ -251,7 +232,6 @@ class RvolutionSimulator:
         })
 
     async def health_check(self, request: Request) -> Response:
-        """Health check endpoint."""
         return web.json_response({
             "status": "healthy", 
             "device_id": self.device_info["device_id"],
@@ -260,14 +240,12 @@ class RvolutionSimulator:
         })
 
     async def get_device_info(self, request: Request) -> Response:
-        """Get device information."""
         return web.json_response({
             "status": "ok",
             **self.device_info
         })
 
     async def get_device_status(self, request: Request) -> Response:
-        """Get current device status."""
         return web.json_response({
             "status": "ok",
             **self.device_state,
@@ -275,7 +253,6 @@ class RvolutionSimulator:
         })
 
     async def handle_ir_command(self, request: Request) -> Response:
-        """Handle IR command requests - main API endpoint."""
         cmd = request.query.get('cmd')
         ir_code = request.query.get('ir_code')
         
@@ -285,7 +262,6 @@ class RvolutionSimulator:
         if not ir_code:
             return web.json_response({"status": "error", "message": "Missing ir_code parameter"}, status=400)
         
-        # Find command name from IR code
         command_name = None
         for name, code in self.ir_codes.items():
             if code == ir_code:
@@ -296,7 +272,6 @@ class RvolutionSimulator:
             logger.warning(f"Device {self.device_id}: Unknown IR code received: {ir_code}")
             return web.json_response({"status": "error", "message": f"Unknown IR code: {ir_code}"}, status=404)
         
-        # Process the command
         await self._process_command(command_name)
         
         logger.info(f"Device {self.device_id}: Executed command '{command_name}' (IR: {ir_code})")
@@ -308,7 +283,6 @@ class RvolutionSimulator:
         })
 
     async def _process_command(self, command: str) -> None:
-        """Process IR command and update device state."""
         if command == "Power On":
             self.device_state["power"] = "on"
         elif command == "Power Off":
@@ -368,7 +342,6 @@ class RvolutionSimulator:
             self.device_state["repeat"] = not self.device_state["repeat"]
 
     async def debug_state(self, request: Request) -> Response:
-        """Get current simulator state for debugging."""
         return web.json_response({
             "device_state": self.device_state,
             "device_info": self.device_info,
@@ -379,7 +352,6 @@ class RvolutionSimulator:
         })
 
     async def debug_reset(self, request: Request) -> Response:
-        """Reset simulator to initial state."""
         self.device_state.update({
             "power": "on",
             "volume": 50 + (self.device_id * 5),
@@ -400,7 +372,6 @@ class RvolutionSimulator:
         return web.json_response({"message": "State reset to defaults", "status": "ok"})
 
     async def debug_ir_codes(self, request: Request) -> Response:
-        """Get all available IR codes for this device type."""
         return web.json_response({
             "device_type": self.device_type.value,
             "device_id": self.device_info["device_id"],
@@ -409,12 +380,10 @@ class RvolutionSimulator:
         })
 
     def _start_position_update(self):
-        """Start position update task."""
         if self._position_task is None:
             self._position_task = asyncio.create_task(self._position_updater())
     
     async def _position_updater(self):
-        """Update position when playing."""
         while True:
             try:
                 await asyncio.sleep(1)
@@ -434,9 +403,8 @@ class RvolutionSimulator:
                 logger.error(f"Device {self.device_id}: Position update error: {e}")
 
     async def _change_media(self) -> None:
-        """Change to new media content."""
         movie_num = random.randint(1, 20)
-        duration = random.randint(3600, 9000)  # 1-2.5 hours
+        duration = random.randint(3600, 9000)
         
         self.device_state.update({
             "title": f"Movie {movie_num} - Device {self.device_id}",
@@ -450,7 +418,6 @@ class RvolutionSimulator:
             self.device_state["playback"] = "play"
 
     async def start(self) -> None:
-        """Start the simulator server."""
         runner = web.AppRunner(self.app)
         await runner.setup()
         site = web.TCPSite(runner, self.host, self.port)
@@ -462,7 +429,6 @@ class RvolutionSimulator:
 
 
 class MultiDeviceSimulator:
-    """Manages multiple R_volution device simulators."""
     
     def __init__(self):
         self.simulators: List[RvolutionSimulator] = []
@@ -470,11 +436,9 @@ class MultiDeviceSimulator:
         self.host = get_local_ip()
     
     async def create_simulators(self, amlogic_count: int = 2, player_count: int = 2) -> List[Dict[str, Any]]:
-        """Create multiple device simulators."""
         device_configs = []
         device_id = 1
         
-        # Create Amlogic devices
         for i in range(amlogic_count):
             port = self.base_port + device_id - 1
             device_name = f"PlayerOne-8K-{device_id}"
@@ -500,7 +464,6 @@ class MultiDeviceSimulator:
             })
             device_id += 1
         
-        # Create Player devices
         for i in range(player_count):
             port = self.base_port + device_id - 1
             device_name = f"R_volution-Player-{device_id}"
@@ -529,7 +492,6 @@ class MultiDeviceSimulator:
         return device_configs
     
     async def start_all(self) -> None:
-        """Start all simulators."""
         logger.info(f"Starting {len(self.simulators)} R_volution device simulators...")
         
         start_tasks = [simulator.start() for simulator in self.simulators]
@@ -537,7 +499,7 @@ class MultiDeviceSimulator:
         
         logger.info("")
         logger.info("=" * 70)
-        logger.info("🎬 Multi-Device R_volution Simulator Ready")
+        logger.info("Multi-Device R_volution Simulator Ready")
         logger.info("=" * 70)
         logger.info("")
         logger.info("Use these addresses in the integration setup:")
@@ -567,7 +529,6 @@ class MultiDeviceSimulator:
 
 
 async def main():
-    """Main entry point for the multi-device simulator."""
     import argparse
     
     parser = argparse.ArgumentParser(description="R_volution Multi-Device Simulator")
@@ -585,14 +546,13 @@ async def main():
         logging.getLogger().setLevel(logging.DEBUG)
     
     if args.single:
-        # Single device mode
         host = args.host if args.host else get_local_ip()
         device_type = DeviceType.AMLOGIC if args.type == 'amlogic' else DeviceType.PLAYER
         simulator = RvolutionSimulator(host, args.port, f"R_volution-{args.type}-SIM", 1, device_type)
         await simulator.start()
         
         logger.info("")
-        logger.info("🎬 Single R_volution Simulator Started")
+        logger.info("Single R_volution Simulator Started")
         logger.info("=" * 50)
         logger.info("")
         logger.info("Use this address in the integration setup:")
@@ -611,7 +571,6 @@ async def main():
         except KeyboardInterrupt:
             logger.info("R_volution Simulator stopped by user")
     else:
-        # Multi-device mode
         multi_sim = MultiDeviceSimulator()
         multi_sim.host = args.host if args.host else get_local_ip()
         multi_sim.base_port = args.port
@@ -619,7 +578,6 @@ async def main():
         device_configs = await multi_sim.create_simulators(args.amlogic, args.player)
         await multi_sim.start_all()
         
-        # Show test commands
         logger.info("Test commands for devices:")
         for config in device_configs:
             logger.info(f"  {config['name']} ({config['device_type']}):")
@@ -635,7 +593,7 @@ async def main():
 
 
 if __name__ == "__main__":
-    print("🎬 R_volution Multi-Device Simulator")
+    print("R_volution Multi-Device Simulator")
     print("=" * 50)
     print("This simulator provides web servers that mimic R_volution device APIs")
     print("for testing the Unfolded Circle integration without physical hardware.")

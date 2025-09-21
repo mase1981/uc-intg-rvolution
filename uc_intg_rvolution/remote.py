@@ -67,27 +67,27 @@ class RvolutionRemote(ucapi.Remote):
         
         main_page = UiPage("main", "Main Controls", grid=Size(4, 6))
         
-        main_page.add(create_ui_text("POWER", 0, 0, cmd="Power On"))
-        main_page.add(create_ui_text("Guide", 1, 0, cmd="guide"))
-        main_page.add(create_ui_text("Menu", 2, 0, cmd="services"))
-        main_page.add(create_ui_text("Help", 3, 0, cmd="help"))
+        main_page.add(create_ui_text("Power", 0, 0, cmd="Power On"))
+        main_page.add(create_ui_text("Info", 1, 0, cmd="Info"))
+        main_page.add(create_ui_text("Menu", 2, 0, cmd="Menu"))
+        main_page.add(create_ui_text("Home", 3, 0, cmd="Home"))
 
-        main_page.add(create_ui_icon("uc:up", 1, 1, cmd="up"))
-        main_page.add(create_ui_icon("uc:left", 0, 2, cmd="left"))
-        main_page.add(create_ui_text("OK", 1, 2, cmd="select"))
-        main_page.add(create_ui_icon("uc:right", 2, 2, cmd="right"))
-        main_page.add(create_ui_icon("uc:down", 1, 3, cmd="down"))
-        main_page.add(create_ui_text("Back", 3, 2, cmd="back"))
+        main_page.add(create_ui_icon("uc:up", 1, 1, cmd="Cursor Up"))
+        main_page.add(create_ui_icon("uc:left", 0, 2, cmd="Cursor Left"))
+        main_page.add(create_ui_text("OK", 1, 2, cmd="Cursor Enter"))
+        main_page.add(create_ui_icon("uc:right", 2, 2, cmd="Cursor Right"))
+        main_page.add(create_ui_icon("uc:down", 1, 3, cmd="Cursor Down"))
+        main_page.add(create_ui_text("Back", 3, 2, cmd="Return"))
 
-        main_page.add(create_ui_icon("uc:play", 0, 4, cmd="play"))
-        main_page.add(create_ui_text("Pause", 1, 4, cmd="pause"))
-        main_page.add(create_ui_icon("uc:stop", 2, 4, cmd="stop"))
-        main_page.add(create_ui_icon("uc:record", 3, 4, cmd="record"))
+        main_page.add(create_ui_text("Play", 0, 4, cmd="Play/Pause"))
+        main_page.add(create_ui_text("Stop", 1, 4, cmd="Stop"))
+        main_page.add(create_ui_text("Next", 2, 4, cmd="Next"))
+        main_page.add(create_ui_text("Prev", 3, 4, cmd="Previous"))
 
-        main_page.add(create_ui_text("CH+", 0, 5, cmd="channelup"))
-        main_page.add(create_ui_text("CH-", 1, 5, cmd="channeldown"))
-        main_page.add(create_ui_text("Home", 2, 5, cmd="home"))
-        main_page.add(create_ui_text("Sky", 3, 5, cmd="sky"))
+        main_page.add(create_ui_text("Vol+", 0, 5, cmd="Volume Up"))
+        main_page.add(create_ui_text("Vol-", 1, 5, cmd="Volume Down"))
+        main_page.add(create_ui_text("Mute", 2, 5, cmd="Mute"))
+        main_page.add(create_ui_text("FF", 3, 5, cmd="Fast Forward"))
 
         pages.append(main_page)
 
@@ -137,9 +137,15 @@ class RvolutionRemote(ucapi.Remote):
         
         advanced_page.add(create_ui_text("+60s", 0, 1, cmd="60 sec forward"))
         advanced_page.add(create_ui_text("-60s", 1, 1, cmd="60 sec rewind"))
+        advanced_page.add(create_ui_text("Audio", 2, 1, cmd="Audio"))
+        advanced_page.add(create_ui_text("Subtitle", 3, 1, cmd="Subtitle"))
+        
+        advanced_page.add(create_ui_text("Repeat", 0, 2, cmd="Repeat"))
+        advanced_page.add(create_ui_text("Zoom", 1, 2, cmd="Zoom"))
+        advanced_page.add(create_ui_text("Toggle", 2, 2, cmd="Power Toggle"))
         
         if device_type == DeviceType.PLAYER and "HDMI/XMOS Audio Toggle" in self._client.get_available_commands():
-            advanced_page.add(create_ui_text("HDMI/XMOS", 2, 1, cmd="HDMI/XMOS Audio Toggle"))
+            advanced_page.add(create_ui_text("HDMI/XMOS", 3, 2, cmd="HDMI/XMOS Audio Toggle"))
         
         pages.append(advanced_page)
         
