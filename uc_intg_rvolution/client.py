@@ -338,6 +338,7 @@ class RvolutionClient:
         return await self.send_ir_command("Audio")
     
     async def toggle_repeat(self) -> bool:
+        """Toggle repeat mode."""
         return await self.send_ir_command("Repeat")
     
     async def zoom(self) -> bool:
