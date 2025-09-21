@@ -15,8 +15,6 @@ Control your R_volution media players directly from your Unfolded Circle Remote 
 
 This integration provides full control of your R_volution media players directly from your Unfolded Circle Remote, with automatic multi-device detection and comprehensive media player and remote functionality.
 
-**Production Ready**: Tested and verified working with real R_volution devices and simulator across multiple device types.
-
 ### 📺 **Multi-Device Support**
 
 - **Multi-Device Setup**: Configure up to 10 R_volution devices in a single integration
