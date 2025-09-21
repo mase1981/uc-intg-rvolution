@@ -3,11 +3,7 @@
 Control your R_volution media players directly from your Unfolded Circle Remote 2 or Remote 3 with comprehensive remote control and media player functionality.
 
 ![R_volution](https://img.shields.io/badge/R_volution-Media%20Players-blue)
-<<<<<<< HEAD
-![Version](https://img.shields.io/badge/version-1.0.0-green)
-=======
-![Version](https://img.shields.io/badge/version-1.0.1-green)
->>>>>>> 441245fa880724bb3723b038c2114307f227a354
+![Version](https://img.shields.io/badge/version-1.0.2-green)
 ![License](https://img.shields.io/badge/license-MPL--2.0-blue)
 [![Buy Me A Coffee](https://img.shields.io/badge/buy%20me%20a%20coffee-donate-yellow.svg)](https://buymeacoffee.com/meirmiyara)
 [![PayPal](https://img.shields.io/badge/PayPal-donate-blue.svg)](https://paypal.me/mmiyara)
