@@ -1,5 +1,5 @@
 """
-R_volution Device Client Implementation with Connection Management Fixes.
+R_volution Device Client Implementation
 
 :copyright: (c) 2025 by Meir Miyara.
 :license: MPL-2.0, see LICENSE for more details.
@@ -32,15 +32,15 @@ class RvolutionClient:
     """Client for interacting with R_volution devices via HTTP API."""
 
     def __init__(self, device_config: DeviceConfig):
-        """Initialize R_volution client with connection management."""
+        """Initialize R_volution client with corrected connection management."""
         self._device_config = device_config
         self._session: Optional[aiohttp.ClientSession] = None
         self._last_request_time = 0
-        self._min_request_interval = 0.75  # 750ms between requests (critical for stability)
-        self._max_retries = 3
-        self._base_timeout = 15  # Increased timeout for unstable HTTP servers
+        self._min_request_interval = 0.5  # 500ms between requests
+        self._max_retries = 2
+        self._base_timeout = 10
         
-        # Device-specific command sets
+        # Device-specific command sets (same as before)
         self._amlogic_commands = {
             "Power On": "4CB34040",
             "Power Off": "4AB54040", 
@@ -147,7 +147,7 @@ class RvolutionClient:
             "Explorer": "EC164040",
             "Format Scroll": "EC144040",
             "Mouse": "EC474040",
-            "HDMI/XMOS Audio Toggle": "BA45BF00"  # Player-specific
+            "HDMI/XMOS Audio Toggle": "BA45BF00"
         }
 
     async def __aenter__(self):
@@ -160,30 +160,29 @@ class RvolutionClient:
         await self.close()
 
     async def _ensure_session(self):
-        """Ensure HTTP session is available with optimal settings for R_volution devices."""
+        """Ensure HTTP session with CORRECTED connector configuration."""
         if self._session is None or self._session.closed:
             connector = aiohttp.TCPConnector(
                 limit=1,  # Only one connection at a time per client
                 limit_per_host=1,  # One connection per device
-                force_close=True,  # Close connection after each request (critical!)
+                force_close=True,  # Close connection after each request
                 enable_cleanup_closed=True,
                 ssl_context=certifi.where() if certifi else None,
-                keepalive_timeout=0,  # Disable keep-alive
                 ttl_dns_cache=300
             )
             
             timeout = aiohttp.ClientTimeout(
                 total=self._base_timeout,
                 connect=5,
-                sock_read=10
+                sock_read=8
             )
             
             self._session = aiohttp.ClientSession(
                 connector=connector,
                 timeout=timeout,
                 headers={
-                    'User-Agent': 'UC-Integration-RVolution/1.0',
-                    'Connection': 'close',  # Explicitly request connection closure
+                    'User-Agent': 'UC-Integration-RVolution/1.0.6',
+                    'Connection': 'close',
                     'Cache-Control': 'no-cache'
                 }
             )
@@ -196,7 +195,7 @@ class RvolutionClient:
             await asyncio.sleep(0.1)
 
     async def _throttled_request(self, url: str, retry_count: int = 0) -> Optional[str]:
-        """Make throttled HTTP request with retry logic for unstable R_volution devices."""
+        """Make throttled HTTP request with simplified retry logic."""
         await self._ensure_session()
         
         time_since_last = time.time() - self._last_request_time
@@ -213,22 +212,21 @@ class RvolutionClient:
                 content = await response.text()
                 
                 if response.status == 200:
-                    # Additional delay after successful request for device stability
-                    await asyncio.sleep(0.2)
                     return content
                 else:
                     _LOG.warning(f"HTTP {response.status} from {self._device_config.ip_address}")
+                    if retry_count < self._max_retries:
+                        await asyncio.sleep(1.0)
+                        return await self._throttled_request(url, retry_count + 1)
                     return None
                     
         except (aiohttp.ClientConnectorError, aiohttp.ClientError) as e:
             error_msg = str(e)
             _LOG.warning(f"Connection error to {self._device_config.ip_address} (attempt {retry_count + 1}): {error_msg}")
             
-            # Retry logic for connection instability
             if retry_count < self._max_retries:
-                # Progressive backoff with longer delays for unstable servers
-                backoff_delay = (retry_count + 1) * 2.0  # 2s, 4s, 6s delays
-                _LOG.info(f"Retrying in {backoff_delay}s due to connection instability...")
+                backoff_delay = (retry_count + 1) * 1.5  # 1.5s, 3s delays
+                _LOG.info(f"Retrying in {backoff_delay}s...")
                 await asyncio.sleep(backoff_delay)
                 
                 # Recreate session on connection errors
@@ -242,7 +240,7 @@ class RvolutionClient:
         except asyncio.TimeoutError:
             _LOG.warning(f"Request timeout to {self._device_config.ip_address}")
             if retry_count < self._max_retries:
-                await asyncio.sleep(2.0)
+                await asyncio.sleep(1.5)
                 return await self._throttled_request(url, retry_count + 1)
             else:
                 raise ConnectionError("Request timeout after retries")
@@ -252,12 +250,11 @@ class RvolutionClient:
             raise ConnectionError(f"Unexpected error: {e}")
 
     async def test_connection(self) -> bool:
-        """Test connection using single lightweight command to avoid overwhelming device HTTP server."""
+        """Test connection using single lightweight command."""
         try:
             _LOG.info(f"Testing connection to {self._device_config.name} at {self._device_config.ip_address}")
             
-            # Use only the most reliable command for testing (based on discovery data)
-            # Power Toggle is known to work reliably on both device types
+            # Use Power Toggle as the test command - reliable on both device types
             if self._device_config.device_type == DeviceType.AMLOGIC:
                 test_ir_code = self._amlogic_commands["Power Toggle"]
             else:
@@ -267,15 +264,11 @@ class RvolutionClient:
             
             response = await self._throttled_request(url)
             
-            if response and 'command_status" value="ok"' in response:
+            if response and ('command_status" value="ok"' in response or 'command_status" value="failed"' in response):
                 _LOG.info(f"Connection test successful for {self._device_config.name}")
                 return True
-            elif response and 'command_status" value="failed"' in response:
-                # Even failed IR commands indicate successful HTTP communication
-                _LOG.info(f"Connection successful (IR command failed) for {self._device_config.name}")
-                return True
             else:
-                _LOG.warning(f"Connection test failed for {self._device_config.name}")
+                _LOG.warning(f"Connection test failed for {self._device_config.name} - no valid response")
                 return False
                 
         except ConnectionError as e:
@@ -286,7 +279,7 @@ class RvolutionClient:
             return False
 
     async def send_ir_command(self, command: str) -> bool:
-        """Send IR command with connection management optimized for R_volution device stability."""
+        """Send IR command with stable connection management."""
         try:
             # Get appropriate command set based on device type
             if self._device_config.device_type == DeviceType.AMLOGIC:
@@ -309,10 +302,10 @@ class RvolutionClient:
                 _LOG.debug(f"IR command '{command}' successful")
                 return True
             elif response and 'command_status" value="failed"' in response:
-                _LOG.warning(f"IR command '{command}' failed (device reported failure)")
+                _LOG.debug(f"IR command '{command}' failed (device reported failure)")
                 return False
             else:
-                _LOG.warning(f"IR command '{command}' - unexpected response")
+                _LOG.warning(f"IR command '{command}' - unexpected or no response")
                 return False
                 
         except ConnectionError as e:
@@ -363,9 +356,8 @@ class RvolutionClient:
         return await self.send_ir_command("Mute")
 
     async def get_device_status(self) -> Optional[Dict[str, Any]]:
-        """Get device status information (may not be available on all devices)."""
+        """Get device status information (limited availability)."""
         try:
-            # Try common status endpoints
             status_urls = [
                 f"http://{self._device_config.ip_address}:{self._device_config.port}/device/status",
                 f"http://{self._device_config.ip_address}:{self._device_config.port}/as/system/information"
@@ -374,14 +366,12 @@ class RvolutionClient:
             for url in status_urls:
                 try:
                     response = await self._throttled_request(url)
-                    if response:
-                        # Try to parse as JSON
+                    if response and response.startswith('{'):
                         import json
                         return json.loads(response)
                 except:
-                    continue  # Try next endpoint
+                    continue
             
-            _LOG.debug(f"No status endpoint available for {self._device_config.name}")
             return None
             
         except Exception as e:
