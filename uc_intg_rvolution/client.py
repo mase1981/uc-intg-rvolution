@@ -253,18 +253,38 @@ class RvolutionClient:
         return f"http://{self._device_config.ip_address}:{port}{endpoint}"
 
     async def test_connection(self) -> bool:
-        """Test HTTP connectivity without sending IR commands."""
+        """Test device connectivity using non-disruptive Info command."""
         try:
             _LOG.info(f"Testing connection to {self._device_config.name}")
             
-            # Test basic HTTP connectivity with root endpoint
-            url = self._build_url("/")
+            # Use Info command for testing - non-disruptive and reliable
+            if self._device_config.device_type == DeviceType.AMLOGIC:
+                test_ir_code = self._amlogic_commands["Info"]
+            else:
+                test_ir_code = self._player_commands["Info"]
+            
+            url = self._build_url(f"/cgi-bin/do?cmd=ir_code&ir_code={test_ir_code}")
             response = await self._http_request(url)
             
             if response is not None:
-                _LOG.info(f"Connection test passed for {self._device_config.name}")
-                self.connection_established = True
-                return True
+                # Check for valid R_volution response indicators
+                success_indicators = [
+                    'command_status" value="ok"',
+                    'command_status" value="failed"',
+                    '<r>',
+                    'status=',
+                    'result='
+                ]
+                
+                has_valid_response = any(indicator in response for indicator in success_indicators)
+                
+                if has_valid_response:
+                    _LOG.info(f"Connection test passed for {self._device_config.name}")
+                    self.connection_established = True
+                    return True
+                else:
+                    _LOG.warning(f"Connection test inconclusive for {self._device_config.name}")
+                    return False
             else:
                 _LOG.warning(f"Connection test failed for {self._device_config.name}")
                 return False
