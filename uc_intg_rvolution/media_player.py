@@ -79,7 +79,7 @@ class RvolutionMediaPlayer(MediaPlayer):
         _LOG.info(f"Created media player entity: {entity_id} for {device_config.name}")
 
     async def _cmd_handler(self, entity: ucapi.Entity, cmd_id: str, params: dict[str, Any] | None) -> StatusCodes:
-        _LOG.info(f"Media player {self.id} received command: {cmd_id} with params: {params}")
+        _LOG.debug(f"Media player {self.id} received command: {cmd_id}")
         
         try:
             if cmd_id == Commands.ON:
@@ -133,13 +133,12 @@ class RvolutionMediaPlayer(MediaPlayer):
                 return StatusCodes.OK if success else StatusCodes.SERVER_ERROR
             
             elif cmd_id == Commands.UNMUTE:
-                success = await self._client.mute()  # Toggle mute off
+                success = await self._client.mute()
                 if success:
                     await self._update_attributes({Attributes.MUTED: False})
                 return StatusCodes.OK if success else StatusCodes.SERVER_ERROR
             
             elif cmd_id == Commands.VOLUME and params and "volume" in params:
-                # Volume control not directly supported by R_volution IR
                 return StatusCodes.NOT_IMPLEMENTED
             
             else:
@@ -161,11 +160,11 @@ class RvolutionMediaPlayer(MediaPlayer):
             return StatusCodes.SERVER_ERROR
 
     async def _update_attributes(self, attributes: dict[str, Any]) -> None:
+        """Update entity attributes."""
         try:
             for key, value in attributes.items():
                 self.attributes[key] = value
             
-            # Force update to integration API
             if self._api and hasattr(self._api, 'configured_entities') and self._api.configured_entities:
                 try:
                     self._api.configured_entities.update_attributes(self.id, attributes)
@@ -178,13 +177,14 @@ class RvolutionMediaPlayer(MediaPlayer):
             _LOG.error(f"Failed to update attributes for media player {self.id}: {e}")
 
     async def test_connection(self) -> bool:
+        """Test device connectivity."""
         try:
             success = await self._client.test_connection()
             
             if success:
                 await self._update_attributes({Attributes.STATE: States.ON})
                 self._attr_available = True
-                _LOG.info(f"Media player {self.id} connection test successful")
+                _LOG.debug(f"Media player {self.id} connection test successful")
             else:
                 await self._update_attributes({Attributes.STATE: States.UNAVAILABLE})
                 self._attr_available = False
@@ -199,29 +199,21 @@ class RvolutionMediaPlayer(MediaPlayer):
             return False
 
     async def push_update(self) -> None:
-        """Push entity state update to prevent race conditions."""
-        _LOG.debug(f"Pushing update for media player {self.id}")
+        """Update entity state to prevent race conditions."""
+        _LOG.debug(f"Updating state for media player {self.id}")
         
         try:
-            # Test connection to update availability
             connection_success = await self.test_connection()
             
             if connection_success:
-                # Update state based on connection status
                 if self._client.connection_established:
-                    await self._update_attributes({
-                        Attributes.STATE: States.ON,
-                    })
+                    await self._update_attributes({Attributes.STATE: States.ON})
                     self._attr_available = True
                 else:
-                    await self._update_attributes({
-                        Attributes.STATE: States.UNKNOWN,
-                    })
+                    await self._update_attributes({Attributes.STATE: States.UNKNOWN})
                     self._attr_available = True
             else:
-                await self._update_attributes({
-                    Attributes.STATE: States.UNAVAILABLE,
-                })
+                await self._update_attributes({Attributes.STATE: States.UNAVAILABLE})
                 self._attr_available = False
             
             self._initialization_complete = True
