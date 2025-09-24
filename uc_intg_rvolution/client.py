@@ -1,5 +1,5 @@
 """
-R_volution Device Client Implementation.
+R_volution Device Client Implementation
 
 :copyright: (c) 2025 by Meir Miyara.
 :license: MPL-2.0, see LICENSE for more details.
@@ -7,7 +7,6 @@ R_volution Device Client Implementation.
 
 import asyncio
 import logging
-import ssl
 import time
 from typing import Any, Dict, List, Optional
 
@@ -29,19 +28,17 @@ class CommandError(Exception):
 
 
 class RvolutionClient:
-    """Client for interacting with R_volution devices via HTTP API."""
 
     def __init__(self, device_config: DeviceConfig):
-        """Initialize R_volution client with complete SSL fix."""
+        """Initialize R_volution client."""
         self._device_config = device_config
         self._session: Optional[aiohttp.ClientSession] = None
         self._last_request_time = 0
-        self._min_request_interval = 0.3  # Reduced to 300ms for better responsiveness
+        self._min_request_interval = 0.3
         self._max_retries = 2
-        self._base_timeout = 8  # Reduced timeout for faster feedback
-        self._connection_established = False
+        self._base_timeout = 8
         
-        # Device-specific command sets (unchanged)
+        # Device-specific command sets
         self._amlogic_commands = {
             "Power On": "4CB34040",
             "Power Off": "4AB54040", 
@@ -161,21 +158,13 @@ class RvolutionClient:
         await self.close()
 
     async def _ensure_session(self):
-        """Ensure HTTP session with COMPLETE SSL fix."""
+        """Ensure HTTP session with minimal SSL configuration."""
         if self._session is None or self._session.closed:
-            # Create explicit SSL context that disables SSL entirely
-            ssl_context = ssl.create_default_context()
-            ssl_context.check_hostname = False
-            ssl_context.verify_mode = ssl.CERT_NONE
-            
             connector = aiohttp.TCPConnector(
                 limit=1,
                 limit_per_host=1,
                 force_close=True,
-                enable_cleanup_closed=True,
-                ssl=None,  # Changed from False to None for complete SSL disable
-                use_dns_cache=False,  # Disable DNS caching for better reliability
-                ttl_dns_cache=0
+                enable_cleanup_closed=True
             )
             
             timeout = aiohttp.ClientTimeout(
@@ -188,26 +177,21 @@ class RvolutionClient:
                 connector=connector,
                 timeout=timeout,
                 headers={
-                    'User-Agent': 'UC-Integration-RVolution/1.0.8',
-                    'Connection': 'close',
-                    'Accept': '*/*'
+                    'User-Agent': 'UC-Integration-RVolution/1.0.9',
+                    'Connection': 'close'
                 }
             )
-            _LOG.debug("HTTP session created with SSL completely disabled")
 
     async def close(self):
-        """Close HTTP session and cleanup resources."""
+        """Close HTTP session."""
         if self._session and not self._session.closed:
             await self._session.close()
             await asyncio.sleep(0.1)
-            self._session = None
-        self._connection_established = False
 
     async def _throttled_request(self, url: str, retry_count: int = 0) -> Optional[str]:
-        """Make throttled HTTP request with complete SSL fix."""
+        """Make throttled HTTP request."""
         await self._ensure_session()
         
-        # Enforce minimum time between requests
         time_since_last = time.time() - self._last_request_time
         if time_since_last < self._min_request_interval:
             await asyncio.sleep(self._min_request_interval - time_since_last)
@@ -215,38 +199,27 @@ class RvolutionClient:
         self._last_request_time = time.time()
         
         try:
-            _LOG.debug(f"Making HTTP request to: {url}")
-            
-            if url.startswith('https://'):
-                url = url.replace('https://', 'http://')
-                _LOG.warning("Forced HTTPS to HTTP conversion")
-            
+            _LOG.debug(f"Making request to: {url}")
             async with self._session.get(url) as response:
                 content = await response.text()
                 
                 if response.status == 200:
-                    self._connection_established = True
-                    _LOG.debug(f"Request successful: {response.status}")
                     return content
                 else:
                     _LOG.warning(f"HTTP {response.status} from {self._device_config.ip_address}")
                     if retry_count < self._max_retries:
-                        await asyncio.sleep(0.5)
+                        await asyncio.sleep(1.0)
                         return await self._throttled_request(url, retry_count + 1)
                     return None
                     
-        except (aiohttp.ClientConnectorError, aiohttp.ClientError, aiohttp.ClientSSLError) as e:
+        except (aiohttp.ClientConnectorError, aiohttp.ClientError) as e:
             error_msg = str(e)
             _LOG.error(f"Connection error to {self._device_config.ip_address}: {error_msg}")
             
-            # Force session recreation on any SSL or connection error
-            if 'ssl' in error_msg.lower() or 'certificate' in error_msg.lower():
-                _LOG.warning("SSL-related error detected, forcing session recreation")
-                await self.close()
-                await self._ensure_session()
-            
             if retry_count < self._max_retries:
                 await asyncio.sleep(1.0)
+                await self.close()
+                await self._ensure_session()
                 return await self._throttled_request(url, retry_count + 1)
             else:
                 raise ConnectionError(f"Failed to connect after retries: {error_msg}")
@@ -260,30 +233,32 @@ class RvolutionClient:
                 raise ConnectionError("Request timeout after retries")
                 
         except Exception as e:
-            _LOG.error(f"Unexpected error requesting {url}: {type(e).__name__}: {e}")
+            _LOG.error(f"Unexpected error requesting {url}: {e}")
             raise ConnectionError(f"Unexpected error: {e}")
 
     async def test_connection(self) -> bool:
-        """Test connection using single lightweight command with race condition prevention."""
+        """Test connection using single command."""
         try:
             _LOG.info(f"Testing connection to {self._device_config.name} at {self._device_config.ip_address}")
             
-            # Use Power Toggle as the test command - most reliable
             if self._device_config.device_type == DeviceType.AMLOGIC:
                 test_ir_code = self._amlogic_commands["Power Toggle"]
             else:
                 test_ir_code = self._player_commands["Power Toggle"]
             
-            url = f"http://{self._device_config.ip_address}:{self._device_config.port}/cgi-bin/do?cmd=ir_code&ir_code={test_ir_code}"
+            # CRITICAL FIX: Ensure port is always included in URL
+            port = self._device_config.port if hasattr(self._device_config, 'port') and self._device_config.port else 80
+            url = f"http://{self._device_config.ip_address}:{port}/cgi-bin/do?cmd=ir_code&ir_code={test_ir_code}"
+            
+            _LOG.debug(f"Test connection URL: {url}")
             
             response = await self._throttled_request(url)
             
             if response and ('command_status" value="ok"' in response or 'command_status" value="failed"' in response):
-                self._connection_established = True
                 _LOG.info(f"Connection test successful for {self._device_config.name}")
                 return True
             else:
-                _LOG.warning(f"Connection test failed for {self._device_config.name} - no valid response")
+                _LOG.warning(f"Connection test failed for {self._device_config.name}")
                 return False
                 
         except ConnectionError as e:
@@ -294,7 +269,7 @@ class RvolutionClient:
             return False
 
     async def send_ir_command(self, command: str) -> bool:
-        """Send IR command with complete SSL fix and connection state tracking."""
+        """Send IR command."""
         try:
             if self._device_config.device_type == DeviceType.AMLOGIC:
                 command_set = self._amlogic_commands
@@ -302,24 +277,22 @@ class RvolutionClient:
                 command_set = self._player_commands
             
             if command not in command_set:
-                _LOG.warning(f"Unknown command '{command}' for {self._device_config.device_type.value} device")
+                _LOG.warning(f"Unknown command '{command}' for device")
                 return False
             
             ir_code = command_set[command]
-            url = f"http://{self._device_config.ip_address}:{self._device_config.port}/cgi-bin/do?cmd=ir_code&ir_code={ir_code}"
             
-            _LOG.debug(f"Sending IR command '{command}' ({ir_code}) to {self._device_config.name}")
+            # CRITICAL FIX: Ensure port is always included
+            port = self._device_config.port if hasattr(self._device_config, 'port') and self._device_config.port else 80
+            url = f"http://{self._device_config.ip_address}:{port}/cgi-bin/do?cmd=ir_code&ir_code={ir_code}"
+            
+            _LOG.debug(f"Sending IR command '{command}' to URL: {url}")
             
             response = await self._throttled_request(url)
             
             if response and 'command_status" value="ok"' in response:
-                _LOG.debug(f"IR command '{command}' successful")
                 return True
-            elif response and 'command_status" value="failed"' in response:
-                _LOG.debug(f"IR command '{command}' failed (device reported failure)")
-                return False
             else:
-                _LOG.warning(f"IR command '{command}' - unexpected or no response")
                 return False
                 
         except ConnectionError as e:
@@ -328,11 +301,6 @@ class RvolutionClient:
         except Exception as e:
             _LOG.error(f"Unexpected error sending command '{command}': {e}")
             return False
-
-    @property
-    def connection_established(self) -> bool:
-        """Check if connection has been successfully established."""
-        return self._connection_established
 
     async def power_on(self) -> bool:
         """Send power on command."""
@@ -375,11 +343,12 @@ class RvolutionClient:
         return await self.send_ir_command("Mute")
 
     async def get_device_status(self) -> Optional[Dict[str, Any]]:
-        """Get device status information (limited availability)."""
+        """Get device status information."""
         try:
+            port = self._device_config.port if hasattr(self._device_config, 'port') and self._device_config.port else 80
             status_urls = [
-                f"http://{self._device_config.ip_address}:{self._device_config.port}/device/status",
-                f"http://{self._device_config.ip_address}:{self._device_config.port}/as/system/information"
+                f"http://{self._device_config.ip_address}:{port}/device/status",
+                f"http://{self._device_config.ip_address}:{port}/as/system/information"
             ]
             
             for url in status_urls:
@@ -390,11 +359,8 @@ class RvolutionClient:
                         return json.loads(response)
                 except:
                     continue
-            
             return None
-            
-        except Exception as e:
-            _LOG.debug(f"Status request failed for {self._device_config.name}: {e}")
+        except Exception:
             return None
 
     def get_available_commands(self) -> List[str]:
