@@ -1,12 +1,12 @@
 {
   "driver_id": "uc_intg_rvolution",
-  "version": "1.0.18",
+  "version": "1.0.19",
   "min_core_api": "0.21.0",
   "name": {
     "en": "R_Volution Players"
   },
   "description": {
-    "en": "Integration for R_volution media players supporting both Amlogic (PlayerOne 8K, Pro 8K, Mini) and R_volution Player devices via IP control with comprehensive remote functionality"
+    "en": "Enhanced integration for R_volution media players supporting both Amlogic (PlayerOne 8K, Pro 8K, Mini) and R_volution Player devices via IP control with comprehensive remote functionality and real-time media status"
   },
   "icon": "uc:music",
   "developer": {
@@ -41,5 +41,5 @@
       }
     ]
   },
-  "release_date": "2025-09-23"
+  "release_date": "2025-09-25"
 }

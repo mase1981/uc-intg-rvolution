@@ -1,5 +1,5 @@
 """
-R_volution Media Player entity
+R_volution integration driver for Unfolded Circle Remote
 
 :copyright: (c) 2025 by Meir Miyara
 :license: MPL-2.0, see LICENSE for more details.
@@ -7,228 +7,460 @@ R_volution Media Player entity
 
 import asyncio
 import logging
-from typing import Any
+import os
+from typing import Dict, Optional, List, Any
+from aiohttp import web
 
 import ucapi
-from ucapi import StatusCodes
-from ucapi.media_player import Attributes, Commands, DeviceClasses, Features, MediaPlayer, States
+from ucapi import DeviceStates, Events, StatusCodes, IntegrationSetupError, SetupComplete, SetupError, RequestUserInput, UserDataResponse
 
-from uc_intg_rvolution.client import RvolutionClient, ConnectionError, CommandError
-from uc_intg_rvolution.config import DeviceConfig
+from uc_intg_rvolution.client import RvolutionClient
+from uc_intg_rvolution.config import RvolutionConfig, DeviceConfig, DeviceType
+from uc_intg_rvolution.media_player import RvolutionMediaPlayer
+from uc_intg_rvolution.remote import RvolutionRemote
+
+api: ucapi.IntegrationAPI | None = None
+config: RvolutionConfig | None = None
+clients: Dict[str, RvolutionClient] = {}
+media_players: Dict[str, RvolutionMediaPlayer] = {}
+remotes: Dict[str, RvolutionRemote] = {}
+entities_ready: bool = False
+initialization_lock: asyncio.Lock = asyncio.Lock()
 
 _LOG = logging.getLogger(__name__)
 
 
-class RvolutionMediaPlayer(MediaPlayer):
-
-    def __init__(self, client: RvolutionClient, device_config: DeviceConfig, api: ucapi.IntegrationAPI):
-        self._client = client
-        self._device_config = device_config
-        self._api = api
-        self._attr_available = True
-        self._initialization_complete = False
-        
-        entity_id = f"mp_{device_config.device_id}"
-        
-        device_type_name = "Amlogic Player" if device_config.device_type.value == "amlogic" else "R_volution Player"
-        entity_name = f"{device_config.name} ({device_type_name})"
-        
-        features = [
-            Features.ON_OFF,
-            Features.TOGGLE,
-            Features.PLAY_PAUSE,
-            Features.STOP,
-            Features.NEXT,
-            Features.PREVIOUS,
-            Features.VOLUME_UP_DOWN,
-            Features.MUTE_TOGGLE,
-            Features.FAST_FORWARD,
-            Features.REWIND,
-            Features.VOLUME,
-            Features.MUTE,
-            Features.UNMUTE,
-            Features.REPEAT,
-            Features.MEDIA_DURATION,
-            Features.MEDIA_POSITION,
-            Features.MEDIA_TITLE,
-            Features.MEDIA_ARTIST,
-            Features.MEDIA_ALBUM,
-            Features.MEDIA_IMAGE_URL,
-            Features.MEDIA_TYPE,
-            Features.SELECT_SOURCE
-        ]
-        
-        attributes = {
-            Attributes.STATE: States.UNKNOWN,
-            Attributes.VOLUME: 50,
-            Attributes.MUTED: False,
-            Attributes.MEDIA_TITLE: "",
-            Attributes.MEDIA_ARTIST: "",
-            Attributes.MEDIA_ALBUM: "",
-        }
-        
-        super().__init__(
-            identifier=entity_id,
-            name=entity_name,
-            features=features,
-            attributes=attributes,
-            device_class=DeviceClasses.TV,
-            cmd_handler=self._cmd_handler
-        )
-        
-        _LOG.info(f"Created media player entity: {entity_id} for {device_config.name}")
-
-    async def _cmd_handler(self, entity: ucapi.Entity, cmd_id: str, params: dict[str, Any] | None) -> StatusCodes:
-        _LOG.debug(f"Media player {self.id} received command: {cmd_id}")
-        
-        try:
-            if cmd_id == Commands.ON:
-                success = await self._client.power_on()
-                if success:
-                    await self._update_attributes({Attributes.STATE: States.ON})
-                return StatusCodes.OK if success else StatusCodes.SERVER_ERROR
+async def _initialize_integration():
+    global clients, api, config, media_players, remotes, entities_ready
+    
+    async with initialization_lock:
+        if entities_ready:
+            _LOG.debug("Entities already initialized, skipping")
+            return True
             
-            elif cmd_id == Commands.OFF:
-                success = await self._client.power_off()
-                if success:
-                    await self._update_attributes({Attributes.STATE: States.OFF})
-                return StatusCodes.OK if success else StatusCodes.SERVER_ERROR
-            
-            elif cmd_id == Commands.TOGGLE:
-                success = await self._client.power_toggle()
-                if success:
-                    current_state = self.attributes.get(Attributes.STATE, States.UNKNOWN)
-                    new_state = States.OFF if current_state == States.ON else States.ON
-                    await self._update_attributes({Attributes.STATE: new_state})
-                return StatusCodes.OK if success else StatusCodes.SERVER_ERROR
-            
-            elif cmd_id == Commands.PLAY_PAUSE:
-                success = await self._client.play_pause()
-                return StatusCodes.OK if success else StatusCodes.SERVER_ERROR
-            
-            elif cmd_id == Commands.STOP:
-                success = await self._client.stop()
-                return StatusCodes.OK if success else StatusCodes.SERVER_ERROR
-            
-            elif cmd_id == Commands.NEXT:
-                success = await self._client.next_track()
-                return StatusCodes.OK if success else StatusCodes.SERVER_ERROR
-            
-            elif cmd_id == Commands.PREVIOUS:
-                success = await self._client.previous_track()
-                return StatusCodes.OK if success else StatusCodes.SERVER_ERROR
-            
-            elif cmd_id == Commands.VOLUME_UP:
-                success = await self._client.volume_up()
-                return StatusCodes.OK if success else StatusCodes.SERVER_ERROR
-            
-            elif cmd_id == Commands.VOLUME_DOWN:
-                success = await self._client.volume_down()
-                return StatusCodes.OK if success else StatusCodes.SERVER_ERROR
-            
-            elif cmd_id == Commands.MUTE_TOGGLE or cmd_id == Commands.MUTE:
-                success = await self._client.mute()
-                if success:
-                    await self._update_attributes({Attributes.MUTED: True})
-                return StatusCodes.OK if success else StatusCodes.SERVER_ERROR
-            
-            elif cmd_id == Commands.UNMUTE:
-                success = await self._client.mute()
-                if success:
-                    await self._update_attributes({Attributes.MUTED: False})
-                return StatusCodes.OK if success else StatusCodes.SERVER_ERROR
-            
-            elif cmd_id == Commands.VOLUME and params and "volume" in params:
-                return StatusCodes.NOT_IMPLEMENTED
-            
-            else:
-                _LOG.warning(f"Unknown command for media player {self.id}: {cmd_id}")
-                return StatusCodes.NOT_IMPLEMENTED
-                
-        except ConnectionError as e:
-            _LOG.error(f"Connection error for media player {self.id}: {e}")
-            await self._update_attributes({Attributes.STATE: States.UNAVAILABLE})
-            self._attr_available = False
-            return StatusCodes.SERVICE_UNAVAILABLE
-        
-        except CommandError as e:
-            _LOG.error(f"Command error for media player {self.id}: {e}")
-            return StatusCodes.BAD_REQUEST
-        
-        except Exception as e:
-            _LOG.error(f"Unexpected error for media player {self.id}: {e}", exc_info=True)
-            return StatusCodes.SERVER_ERROR
-
-    async def _update_attributes(self, attributes: dict[str, Any]) -> None:
-        """Update entity attributes."""
-        try:
-            for key, value in attributes.items():
-                self.attributes[key] = value
-            
-            if self._api and hasattr(self._api, 'configured_entities') and self._api.configured_entities:
-                try:
-                    self._api.configured_entities.update_attributes(self.id, attributes)
-                except Exception as update_error:
-                    _LOG.debug(f"Could not update integration API: {update_error}")
-            
-            _LOG.debug(f"Updated attributes for media player {self.id}: {attributes}")
-            
-        except Exception as e:
-            _LOG.error(f"Failed to update attributes for media player {self.id}: {e}")
-
-    async def test_connection(self) -> bool:
-        """Test device connectivity."""
-        try:
-            success = await self._client.test_connection()
-            
-            if success:
-                await self._update_attributes({Attributes.STATE: States.ON})
-                self._attr_available = True
-                _LOG.debug(f"Media player {self.id} connection test successful")
-            else:
-                await self._update_attributes({Attributes.STATE: States.UNAVAILABLE})
-                self._attr_available = False
-                _LOG.warning(f"Media player {self.id} connection test failed")
-            
-            return success
-            
-        except Exception as e:
-            _LOG.error(f"Connection test failed for media player {self.id}: {e}")
-            await self._update_attributes({Attributes.STATE: States.UNAVAILABLE})
-            self._attr_available = False
+        if not config or not config.is_configured():
+            _LOG.error("Configuration not found or invalid.")
+            if api: 
+                await api.set_device_state(DeviceStates.ERROR)
             return False
 
-    async def push_update(self) -> None:
-        """Update entity state to prevent race conditions."""
-        _LOG.debug(f"Updating state for media player {self.id}")
+        _LOG.info("Initializing enhanced R_volution integration for %d devices...", len(config.get_all_devices()))
+        if api: 
+            await api.set_device_state(DeviceStates.CONNECTING)
+
+        connected_devices = 0
+
+        api.available_entities.clear()
+        clients.clear()
+        media_players.clear()
+        remotes.clear()
+
+        for device_config in config.get_enabled_devices():
+            try:
+                _LOG.info("Connecting to R_volution device: %s at %s", device_config.name, device_config.ip_address)
+                
+                client = RvolutionClient(device_config)
+                
+                # Use improved connection test with stability fixes
+                connection_success = await client.test_connection()
+                if not connection_success:
+                    _LOG.warning("Failed to connect to device: %s", device_config.name)
+                    await client.close()
+                    continue
+
+                device_name = device_config.name
+                device_entity_id = device_config.device_id
+
+                _LOG.info("Connected to R_volution device: %s (ID: %s, Type: %s)", 
+                         device_name, device_entity_id, device_config.device_type.value)
+
+                media_player_id = f"mp_{device_config.device_id}"
+                remote_id = f"remote_{device_config.device_id}"
+
+                media_player_entity = RvolutionMediaPlayer(client, device_config, api)
+                remote_entity = RvolutionRemote(client, device_config, api)
+
+                api.available_entities.add(media_player_entity)
+                api.available_entities.add(remote_entity)
+
+                clients[device_config.device_id] = client
+                media_players[device_config.device_id] = media_player_entity
+                remotes[device_config.device_id] = remote_entity
+
+                connected_devices += 1
+                _LOG.info("Successfully setup enhanced device: %s", device_config.name)
+
+            except Exception as e:
+                _LOG.error("Failed to setup device %s: %s", device_config.name, e, exc_info=True)
+                continue
+
+        if connected_devices > 0:
+            entities_ready = True
+            await api.set_device_state(DeviceStates.CONNECTED)
+            _LOG.info("Enhanced R_volution integration initialization completed successfully - %d/%d devices connected.", 
+                     connected_devices, len(config.get_all_devices()))
+            return True
+        else:
+            entities_ready = False
+            if api: 
+                await api.set_device_state(DeviceStates.ERROR)
+            _LOG.error("No devices could be connected during initialization")
+            return False
+
+
+async def setup_handler(msg: ucapi.SetupDriver) -> ucapi.SetupAction:
+    global config, entities_ready
+
+    if isinstance(msg, ucapi.DriverSetupRequest):
+        device_count = int(msg.setup_data.get("device_count", 1))
+        host = msg.setup_data.get("host", "").strip()
+        
+        if device_count == 1 and host:
+            return await _handle_single_device_setup(msg.setup_data)
+        else:
+            return await _request_device_configurations(device_count)
+    
+    elif isinstance(msg, UserDataResponse):
+        return await _handle_device_configurations(msg.input_values)
+
+    return SetupError(IntegrationSetupError.OTHER)
+
+
+async def _handle_single_device_setup(setup_data: Dict[str, Any]) -> ucapi.SetupAction:
+    host_input = setup_data.get("host")
+    if not host_input:
+        _LOG.error("No host provided in setup data")
+        return SetupError(IntegrationSetupError.OTHER)
+
+    host = host_input.strip()
+    _LOG.info("Testing connection to R_volution device at %s", host)
+
+    try:
+        device_type = DeviceType.AMLOGIC
+        device_name = f"R_volution Device ({host})"
+        
+        device_config = DeviceConfig(
+            device_id=f"rvolution_{host.replace('.', '_')}",
+            name=device_name,
+            ip_address=host,
+            device_type=device_type
+        )
+        
+        # Use improved connection test with stability fixes
+        test_client = RvolutionClient(device_config)
         
         try:
-            connection_success = await self.test_connection()
-            
-            if connection_success:
-                if self._client.connection_established:
-                    await self._update_attributes({Attributes.STATE: States.ON})
-                    self._attr_available = True
-                else:
-                    await self._update_attributes({Attributes.STATE: States.UNKNOWN})
-                    self._attr_available = True
+            _LOG.info("Testing connection with enhanced stability handling...")
+            connection_successful = await test_client.test_connection()
+        finally:
+            await test_client.close()
+
+        if not connection_successful:
+            _LOG.error("Connection test failed for host: %s", host)
+            return SetupError(IntegrationSetupError.CONNECTION_REFUSED)
+
+        config.add_device(device_config)
+        await _initialize_integration()
+        return SetupComplete()
+
+    except Exception as e:
+        _LOG.error("Setup error: %s", e, exc_info=True)
+        return SetupError(IntegrationSetupError.OTHER)
+
+
+async def _request_device_configurations(device_count: int) -> RequestUserInput:
+    settings = []
+
+    for i in range(device_count):
+        settings.extend([
+            {
+                "id": f"device_{i}_ip",
+                "label": {"en": f"Device {i+1} IP Address"},
+                "description": {"en": f"IP address for R_volution device {i+1} (e.g., 192.168.1.{100+i})"},
+                "field": {"text": {"value": f"192.168.1.{100+i}"}}
+            },
+            {
+                "id": f"device_{i}_name",
+                "label": {"en": f"Device {i+1} Name"},
+                "description": {"en": f"Friendly name for device {i+1}"},
+                "field": {"text": {"value": f"R_volution Device {i+1}"}}
+            },
+            {
+                "id": f"device_{i}_type",
+                "label": {"en": f"Device {i+1} Type"},
+                "description": {"en": f"Select device type for device {i+1}"},
+                "field": {
+                    "dropdown": {
+                        "items": [
+                            {"id": "amlogic", "label": {"en": "Amlogic (PlayerOne 8K, Pro 8K, Mini)"}},
+                            {"id": "player", "label": {"en": "R_volution Player"}}
+                        ]
+                    }
+                }
+            }
+        ])
+
+    return RequestUserInput(
+        title={"en": f"Configure {device_count} R_volution Devices"},
+        settings=settings
+    )
+
+
+async def _handle_device_configurations(input_values: Dict[str, Any]) -> ucapi.SetupAction:
+    devices_to_test = []
+
+    device_index = 0
+    while f"device_{device_index}_ip" in input_values:
+        ip_input = input_values[f"device_{device_index}_ip"]
+        name = input_values[f"device_{device_index}_name"]
+        device_type_str = input_values.get(f"device_{device_index}_type", "amlogic")
+
+        try:
+            if ':' in ip_input:
+                host, port_str = ip_input.split(':', 1)
+                port = int(port_str)
             else:
-                await self._update_attributes({Attributes.STATE: States.UNAVAILABLE})
-                self._attr_available = False
+                host = ip_input
+                port = 80
+        except ValueError:
+            _LOG.error(f"Invalid IP:port format for device {device_index + 1}: {ip_input}")
+            return SetupError(IntegrationSetupError.OTHER)
+
+        host = host.strip()
+        if not host:
+            _LOG.error(f"Invalid IP format for device {device_index + 1}: {ip_input}")
+            return SetupError(IntegrationSetupError.OTHER)
+
+        devices_to_test.append({
+            "host": host,
+            "port": port,
+            "name": name,
+            "device_type": device_type_str,
+            "index": device_index
+        })
+        device_index += 1
+
+    _LOG.info(f"Testing connections to {len(devices_to_test)} devices with enhanced stability handling...")
+    test_results = await _test_multiple_devices_safely(devices_to_test)
+
+    successful_devices = 0
+    for device_data, success in zip(devices_to_test, test_results):
+        if success:
+            device_type = DeviceType.AMLOGIC if device_data['device_type'] == "amlogic" else DeviceType.PLAYER
+            device_id = f"rvolution_{device_data['host'].replace('.', '_')}_{device_data['port']}"
+            device_config = DeviceConfig(
+                device_id=device_id,
+                name=device_data['name'],
+                ip_address=device_data['host'],
+                port=device_data['port'],
+                device_type=device_type
+            )
+            config.add_device(device_config)
+            successful_devices += 1
+            _LOG.info(f"Device {device_data['index'] + 1} ({device_data['name']}) connection successful")
+        else:
+            _LOG.error(f"Device {device_data['index'] + 1} ({device_data['name']}) connection failed")
+
+    if successful_devices == 0:
+        _LOG.error("No devices could be connected")
+        return SetupError(IntegrationSetupError.CONNECTION_REFUSED)
+
+    await _initialize_integration()
+    _LOG.info(f"Enhanced multi-device setup completed: {successful_devices}/{len(devices_to_test)} devices configured")
+    return SetupComplete()
+
+
+async def _test_multiple_devices_safely(devices: List[Dict]) -> List[bool]:
+    """Test multiple devices with improved stability and sequential processing to avoid overwhelming devices."""
+    
+    async def test_single_device_safely(device_data):
+        """Test single device with proper error handling and connection management."""
+        try:
+            device_type = DeviceType.AMLOGIC if device_data['device_type'] == "amlogic" else DeviceType.PLAYER
+            device_config = DeviceConfig(
+                device_id=f"test_{device_data['index']}",
+                name=device_data['name'],
+                ip_address=device_data['host'],
+                port=device_data['port'],
+                device_type=device_type
+            )
             
-            self._initialization_complete = True
-            _LOG.info(f"Media player {self.id} state update completed - Available: {self._attr_available}")
+            _LOG.info(f"Testing enhanced device {device_data['index'] + 1}: {device_data['name']} at {device_data['host']}:{device_data['port']}")
             
+            client = RvolutionClient(device_config)
+            
+            try:
+                # Use improved connection test with stability fixes
+                success = await client.test_connection()
+                _LOG.info(f"Device {device_data['index'] + 1} test result: {'SUCCESS' if success else 'FAILED'}")
+                return success
+            finally:
+                await client.close()
+                
         except Exception as e:
-            _LOG.error(f"Failed to push update for media player {self.id}: {e}")
-            self._attr_available = False
+            _LOG.error(f"Device {device_data['index'] + 1} test exception: {e}")
+            return False
 
-    @property
-    def available(self) -> bool:
-        """Return entity availability."""
-        return self._attr_available and self._initialization_complete
+    results = []
+    
+    for i, device in enumerate(devices):
+        _LOG.info(f"Testing device {i + 1}/{len(devices)}: {device['name']}")
+        
+        result = await test_single_device_safely(device)
+        results.append(result)
+        
+        # Add delay between device tests to prevent HTTP server overload
+        # This is critical for R_volution devices with unstable HTTP implementations
+        if i < len(devices) - 1:  # Don't delay after last device
+            delay = 3.0  # 3 second delay between device tests
+            _LOG.debug(f"Waiting {delay}s before testing next device (HTTP server stability)")
+            await asyncio.sleep(delay)
+    
+    return results
 
-    @property
-    def device_config(self) -> DeviceConfig:
-        """Get device configuration."""
-        return self._device_config
+
+async def on_subscribe_entities(entity_ids: List[str]):
+    _LOG.info("Entities subscribed: %s", entity_ids)
+    
+    if not entities_ready:
+        _LOG.error("RACE CONDITION: Subscription before entities ready!")
+        success = await _initialize_integration()
+        if not success:
+            _LOG.error("Failed to initialize during subscription attempt")
+            return
+    
+    for entity_id in entity_ids:
+        for media_player in media_players.values():
+            if media_player.id == entity_id:
+                await media_player.push_update()
+                break
+        
+        for remote in remotes.values():
+            if remote.id == entity_id:
+                await remote.push_update()
+                break
+
+
+async def on_unsubscribe_entities(entity_ids: List[str]):
+    _LOG.info("Entities unsubscribed: %s", entity_ids)
+    
+    # Clean up status update tasks for media players
+    for entity_id in entity_ids:
+        for media_player in media_players.values():
+            if media_player.id == entity_id:
+                if hasattr(media_player, 'cleanup'):
+                    await media_player.cleanup()
+                break
+
+
+async def on_connect():
+    global entities_ready
+    
+    _LOG.info("Remote Two connected - Enhanced R_volution Integration")
+    
+    if config:
+        config.reload_from_disk()
+    
+    if config and config.is_configured():
+        if not entities_ready:
+            _LOG.warning("Entities not ready on connect - initializing now")
+            await _initialize_integration()
+        else:
+            _LOG.info("Enhanced entities already ready, confirming connection")
+            if api:
+                await api.set_device_state(DeviceStates.CONNECTED)
+    else:
+        _LOG.info("Not configured, waiting for setup")
+        if api:
+            await api.set_device_state(DeviceStates.DISCONNECTED)
+
+
+async def on_disconnect():
+    _LOG.info("Remote Two disconnected")
+
+
+async def health_check(request):
+    return web.Response(text="OK", status=200)
+
+
+async def start_health_server():
+    try:
+        app = web.Application()
+        app.router.add_get('/health', health_check)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, '0.0.0.0', 9090)
+        await site.start()
+        _LOG.info("Health check server started on port 9090")
+    except Exception as e:
+        _LOG.error("Failed to start health server: %s", e)
+
+
+async def main():
+    global api, config
+    
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    _LOG.info("Starting Enhanced R_volution Integration Driver v1.0.19")
+    
+    try:
+        loop = asyncio.get_running_loop()
+        
+        config_dir = os.getenv("UC_CONFIG_HOME", "./")
+        config_file_path = os.path.join(config_dir, "config.json")
+        config = RvolutionConfig(config_file_path)
+
+        driver_path = os.path.join(os.path.dirname(__file__), "..", "driver.json")
+        api = ucapi.IntegrationAPI(loop)
+
+        if config.is_configured():
+            _LOG.info("Pre-configuring enhanced entities before UC Remote connection")
+            _LOG.info(f"Configuration summary: {config.get_summary()}")
+            asyncio.create_task(_initialize_integration())
+
+        await api.init(os.path.abspath(driver_path), setup_handler)
+
+        asyncio.create_task(start_health_server())
+
+        api.add_listener(Events.SUBSCRIBE_ENTITIES, on_subscribe_entities)
+        api.add_listener(Events.UNSUBSCRIBE_ENTITIES, on_unsubscribe_entities)
+        api.add_listener(Events.CONNECT, on_connect)
+        api.add_listener(Events.DISCONNECT, on_disconnect)
+
+        if not config.is_configured():
+            _LOG.info("Device not configured, waiting for setup...")
+            await api.set_device_state(DeviceStates.DISCONNECTED)
+
+        _LOG.info("Enhanced R_volution integration driver started successfully")
+        await asyncio.Future()
+        
+    except Exception as e:
+        _LOG.critical("Fatal error in main: %s", e, exc_info=True)
+    finally:
+        _LOG.info("Shutting down Enhanced R_volution integration")
+        
+        # Clean up media player tasks
+        for media_player in media_players.values():
+            try:
+                if hasattr(media_player, 'cleanup'):
+                    await media_player.cleanup()
+            except Exception as e:
+                _LOG.error(f"Error cleaning up media player: {e}")
+        
+        for client in clients.values():
+            try:
+                await client.close()
+            except Exception as e:
+                _LOG.error(f"Error closing client: {e}")
+
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        _LOG.info("Enhanced integration stopped by user")
+    except Exception as e:
+        _LOG.error(f"Enhanced integration failed: {e}")
+        raise
