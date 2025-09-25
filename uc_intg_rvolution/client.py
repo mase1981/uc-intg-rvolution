@@ -182,7 +182,7 @@ class RvolutionClient:
                 connector=connector,
                 timeout=timeout,
                 headers={
-                    'User-Agent': 'UC-Integration-RVolution/1.0.18',
+                    'User-Agent': 'UC-Integration-RVolution/1.0.12',
                     'Accept': '*/*',
                     'Connection': 'close'
                 }
@@ -373,39 +373,10 @@ class RvolutionClient:
         """Seek to specific position using Dune-style command."""
         try:
             url = self._build_url(f"/cgi-bin/do?cmd=set_playback_state&position={position_seconds}")
-            _LOG.debug(f"Seeking to position {position_seconds}s")
-            
             response = await self._http_request(url)
-            
-            if response and 'command_status" value="ok"' in response:
-                _LOG.debug(f"Seek to {position_seconds}s successful")
-                return True
-            else:
-                _LOG.warning(f"Seek command may have failed")
-                return False
-                
+            return response is not None and 'command_status" value="ok"' in response
         except Exception as e:
             _LOG.error(f"Error seeking to position {position_seconds}: {e}")
-            return False
-
-    async def set_volume(self, volume_level: int) -> bool:
-        """Set volume level (0-100) using Dune-style command."""
-        try:
-            volume_level = max(0, min(100, volume_level))  # Clamp to 0-100
-            url = self._build_url(f"/cgi-bin/do?cmd=set_playback_state&volume={volume_level}")
-            _LOG.debug(f"Setting volume to {volume_level}")
-            
-            response = await self._http_request(url)
-            
-            if response and 'command_status" value="ok"' in response:
-                _LOG.debug(f"Set volume to {volume_level} successful")
-                return True
-            else:
-                _LOG.warning(f"Set volume command may have failed")
-                return False
-                
-        except Exception as e:
-            _LOG.error(f"Error setting volume to {volume_level}: {e}")
             return False
 
     async def power_on(self) -> bool:
@@ -451,7 +422,7 @@ class RvolutionClient:
     async def get_device_status(self) -> Optional[Dict[str, Any]]:
         """Get device status information with enhanced Dune-style status support."""
         try:
-            # Try Dune-style status command first (most comprehensive)
+            # Try Dune-style status command first
             dune_status_url = self._build_url("/cgi-bin/do?cmd=status")
             
             try:
@@ -459,35 +430,30 @@ class RvolutionClient:
                 if response and '<command_result>' in response:
                     status_data = self._parse_xml_status(response)
                     if status_data:
-                        _LOG.debug(f"Device status retrieved via Dune-style API")
                         return status_data
-            except Exception as e:
-                _LOG.debug(f"Dune-style status failed: {e}")
+            except Exception:
+                pass
             
             # Fallback to original endpoints
-            fallback_urls = [
+            status_urls = [
                 self._build_url("/device/status"),
                 self._build_url("/device/info"),
                 self._build_url("/as/system/information")
             ]
             
-            for url in fallback_urls:
+            for url in status_urls:
                 try:
                     response = await self._http_request(url)
                     if response and response.strip().startswith('{'):
                         import json
                         status_data = json.loads(response)
-                        _LOG.debug(f"Device status retrieved from {url}")
                         return status_data
-                except Exception as e:
-                    _LOG.debug(f"Status URL {url} failed: {e}")
+                except Exception:
                     continue
             
-            _LOG.debug(f"No status information available for {self._device_config.name}")
             return None
             
-        except Exception as e:
-            _LOG.debug(f"Status check error: {e}")
+        except Exception:
             return None
 
     def get_available_commands(self) -> List[str]:
