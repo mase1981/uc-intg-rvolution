@@ -1,5 +1,5 @@
 """
-R_volution integration driver for Unfolded Circle Remote.
+R_volution integration driver for Unfolded Circle Remote with connection stability fixes.
 
 :copyright: (c) 2025 by Meir Miyara
 :license: MPL-2.0, see LICENSE for more details.
@@ -61,6 +61,7 @@ async def _initialize_integration():
                 
                 client = RvolutionClient(device_config)
                 
+                # Use improved connection test with stability fixes
                 connection_success = await client.test_connection()
                 if not connection_success:
                     _LOG.warning("Failed to connect to device: %s", device_config.name)
@@ -145,9 +146,14 @@ async def _handle_single_device_setup(setup_data: Dict[str, Any]) -> ucapi.Setup
             device_type=device_type
         )
         
+        # Use improved connection test with stability fixes
         test_client = RvolutionClient(device_config)
-        connection_successful = await test_client.test_connection()
-        await test_client.close()
+        
+        try:
+            _LOG.info("Testing connection with improved stability handling...")
+            connection_successful = await test_client.test_connection()
+        finally:
+            await test_client.close()
 
         if not connection_successful:
             _LOG.error("Connection test failed for host: %s", host)
@@ -234,8 +240,8 @@ async def _handle_device_configurations(input_values: Dict[str, Any]) -> ucapi.S
         })
         device_index += 1
 
-    _LOG.info(f"Testing connections to {len(devices_to_test)} devices...")
-    test_results = await _test_multiple_devices(devices_to_test)
+    _LOG.info(f"Testing connections to {len(devices_to_test)} devices with improved stability handling...")
+    test_results = await _test_multiple_devices_safely(devices_to_test)
 
     successful_devices = 0
     for device_data, success in zip(devices_to_test, test_results):
@@ -264,8 +270,11 @@ async def _handle_device_configurations(input_values: Dict[str, Any]) -> ucapi.S
     return SetupComplete()
 
 
-async def _test_multiple_devices(devices: List[Dict]) -> List[bool]:
-    async def test_device(device_data):
+async def _test_multiple_devices_safely(devices: List[Dict]) -> List[bool]:
+    """Test multiple devices with improved stability and sequential processing to avoid overwhelming devices."""
+    
+    async def test_single_device_safely(device_data):
+        """Test single device with proper error handling and connection management."""
         try:
             device_type = DeviceType.AMLOGIC if device_data['device_type'] == "amlogic" else DeviceType.PLAYER
             device_config = DeviceConfig(
@@ -275,18 +284,39 @@ async def _test_multiple_devices(devices: List[Dict]) -> List[bool]:
                 port=device_data['port'],
                 device_type=device_type
             )
+            
+            _LOG.info(f"Testing device {device_data['index'] + 1}: {device_data['name']} at {device_data['host']}:{device_data['port']}")
+            
             client = RvolutionClient(device_config)
-            success = await client.test_connection()
-            await client.close()
-            return success
+            
+            try:
+                # Use improved connection test with stability fixes
+                success = await client.test_connection()
+                _LOG.info(f"Device {device_data['index'] + 1} test result: {'SUCCESS' if success else 'FAILED'}")
+                return success
+            finally:
+                await client.close()
+                
         except Exception as e:
-            _LOG.error(f"Device {device_data['index'] + 1} test error: {e}")
+            _LOG.error(f"Device {device_data['index'] + 1} test exception: {e}")
             return False
 
-    tasks = [test_device(device) for device in devices]
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-
-    return [result if isinstance(result, bool) else False for result in results]
+    results = []
+    
+    for i, device in enumerate(devices):
+        _LOG.info(f"Testing device {i + 1}/{len(devices)}: {device['name']}")
+        
+        result = await test_single_device_safely(device)
+        results.append(result)
+        
+        # Add delay between device tests to prevent HTTP server overload
+        # This is critical for R_volution devices with unstable HTTP implementations
+        if i < len(devices) - 1:  # Don't delay after last device
+            delay = 3.0  # 3 second delay between device tests
+            _LOG.debug(f"Waiting {delay}s before testing next device (HTTP server stability)")
+            await asyncio.sleep(delay)
+    
+    return results
 
 
 async def on_subscribe_entities(entity_ids: List[str]):
