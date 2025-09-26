@@ -385,8 +385,43 @@ class RvolutionClient:
         return await self.send_ir_command("Mute")
 
     async def get_device_status(self) -> Optional[Dict[str, Any]]:
-        """Get device status information."""
+        """Get device status information using skyrahfall repository approach."""
         try:
+            # Use skyrahfall repository endpoint strategy
+            combined_status = {}
+            
+            # Try R_volution specific endpoints first (from skyrahfall repo)
+            playback_info_url = self._build_url("/as/playback/information")
+            system_info_url = self._build_url("/as/system/information")
+            
+            # Get playback information
+            try:
+                response = await self._http_request(playback_info_url)
+                if response and response.strip().startswith('{'):
+                    import json
+                    playback_data = json.loads(response)
+                    combined_status.update(playback_data)
+                    _LOG.debug(f"Got playback info from /as/playback/information")
+            except Exception as e:
+                _LOG.debug(f"Playback info endpoint failed: {e}")
+            
+            # Get system information
+            try:
+                response = await self._http_request(system_info_url)
+                if response and response.strip().startswith('{'):
+                    import json
+                    system_data = json.loads(response)
+                    combined_status.update(system_data)
+                    _LOG.debug(f"Got system info from /as/system/information")
+            except Exception as e:
+                _LOG.debug(f"System info endpoint failed: {e}")
+            
+            # If we got data from skyrahfall approach, return it
+            if combined_status:
+                _LOG.debug(f"Device status retrieved via skyrahfall approach")
+                return combined_status
+            
+            # Fallback to original endpoints
             status_urls = [
                 self._build_url("/device/status"),
                 self._build_url("/device/info"),
