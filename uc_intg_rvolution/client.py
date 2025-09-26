@@ -8,7 +8,6 @@ R_volution Device Client Implementation
 import asyncio
 import logging
 import time
-import xml.etree.ElementTree as ET
 from typing import Any, Dict, List, Optional
 
 import aiohttp
@@ -253,28 +252,40 @@ class RvolutionClient:
         port = getattr(self._device_config, 'port', 80)
         return f"http://{self._device_config.ip_address}:{port}{endpoint}"
 
-    def _parse_xml_status(self, xml_content: str) -> Dict[str, Any]:
-        """Parse XML status response safely."""
+    def _parse_simple_xml_status(self, xml_content: str) -> Dict[str, Any]:
+        """Simple XML status parsing without external dependencies."""
         try:
-            root = ET.fromstring(xml_content)
             status = {}
             
-            for param in root.findall('.//param'):
-                name = param.get('name', '')
-                value = param.get('value', '')
-                
-                # Convert numeric values
-                if value.isdigit() or (value.startswith('-') and value[1:].isdigit()):
-                    status[name] = int(value)
-                elif value.replace('.', '', 1).isdigit():
-                    status[name] = float(value)
-                else:
-                    status[name] = value
+            # Extract key-value pairs from XML using string parsing
+            lines = xml_content.split('\n')
+            for line in lines:
+                if 'param name=' in line and 'value=' in line:
+                    try:
+                        # Extract name
+                        name_start = line.find('name="') + 6
+                        name_end = line.find('"', name_start)
+                        name = line[name_start:name_end]
+                        
+                        # Extract value  
+                        value_start = line.find('value="') + 7
+                        value_end = line.find('"', value_start)
+                        value = line[value_start:value_end]
+                        
+                        # Convert numeric values
+                        if value.isdigit():
+                            status[name] = int(value)
+                        elif value.replace('.', '', 1).isdigit():
+                            status[name] = float(value)
+                        else:
+                            status[name] = value
+                            
+                    except (ValueError, IndexError):
+                        continue
             
             return status
             
-        except Exception as e:
-            _LOG.debug(f"XML parsing error: {e}")
+        except Exception:
             return {}
 
     async def test_connection(self) -> bool:
@@ -369,16 +380,6 @@ class RvolutionClient:
             _LOG.error(f"Error sending command '{command}': {e}")
             return False
 
-    async def seek_to_position(self, position_seconds: int) -> bool:
-        """Seek to specific position using Dune-style command."""
-        try:
-            url = self._build_url(f"/cgi-bin/do?cmd=set_playback_state&position={position_seconds}")
-            response = await self._http_request(url)
-            return response is not None and 'command_status" value="ok"' in response
-        except Exception as e:
-            _LOG.error(f"Error seeking to position {position_seconds}: {e}")
-            return False
-
     async def power_on(self) -> bool:
         """Send power on command."""
         return await self.send_ir_command("Power On")
@@ -428,11 +429,12 @@ class RvolutionClient:
             try:
                 response = await self._http_request(dune_status_url)
                 if response and '<command_result>' in response:
-                    status_data = self._parse_xml_status(response)
+                    status_data = self._parse_simple_xml_status(response)
                     if status_data:
+                        _LOG.debug(f"Device status retrieved via Dune-style API")
                         return status_data
-            except Exception:
-                pass
+            except Exception as e:
+                _LOG.debug(f"Dune-style status failed: {e}")
             
             # Fallback to original endpoints
             status_urls = [
@@ -447,13 +449,17 @@ class RvolutionClient:
                     if response and response.strip().startswith('{'):
                         import json
                         status_data = json.loads(response)
+                        _LOG.debug(f"Device status retrieved from {url}")
                         return status_data
-                except Exception:
+                except Exception as e:
+                    _LOG.debug(f"Status URL {url} failed: {e}")
                     continue
             
+            _LOG.debug(f"No status information available for {self._device_config.name}")
             return None
             
-        except Exception:
+        except Exception as e:
+            _LOG.debug(f"Status check error: {e}")
             return None
 
     def get_available_commands(self) -> List[str]:

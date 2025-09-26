@@ -27,7 +27,6 @@ class RvolutionMediaPlayer(MediaPlayer):
         self._api = api
         self._attr_available = True
         self._initialization_complete = False
-        self._status_update_task = None
         
         entity_id = f"mp_{device_config.device_id}"
         
@@ -56,8 +55,7 @@ class RvolutionMediaPlayer(MediaPlayer):
             Features.MEDIA_ALBUM,
             Features.MEDIA_IMAGE_URL,
             Features.MEDIA_TYPE,
-            Features.SELECT_SOURCE,
-            Features.SEEK
+            Features.SELECT_SOURCE
         ]
         
         attributes = {
@@ -90,14 +88,12 @@ class RvolutionMediaPlayer(MediaPlayer):
                 success = await self._client.power_on()
                 if success:
                     await self._update_attributes({Attributes.STATE: States.ON})
-                    self._start_status_updates()
                 return StatusCodes.OK if success else StatusCodes.SERVER_ERROR
             
             elif cmd_id == Commands.OFF:
                 success = await self._client.power_off()
                 if success:
                     await self._update_attributes({Attributes.STATE: States.OFF})
-                    self._stop_status_updates()
                 return StatusCodes.OK if success else StatusCodes.SERVER_ERROR
             
             elif cmd_id == Commands.TOGGLE:
@@ -106,30 +102,34 @@ class RvolutionMediaPlayer(MediaPlayer):
                     current_state = self.attributes.get(Attributes.STATE, States.UNKNOWN)
                     new_state = States.OFF if current_state == States.ON else States.ON
                     await self._update_attributes({Attributes.STATE: new_state})
-                    if new_state == States.ON:
-                        self._start_status_updates()
-                    else:
-                        self._stop_status_updates()
                 return StatusCodes.OK if success else StatusCodes.SERVER_ERROR
             
             elif cmd_id == Commands.PLAY_PAUSE:
                 success = await self._client.play_pause()
                 if success:
-                    self._start_status_updates()
+                    # Try to update status after play/pause
+                    await self._try_update_status()
                 return StatusCodes.OK if success else StatusCodes.SERVER_ERROR
             
             elif cmd_id == Commands.STOP:
                 success = await self._client.stop()
                 if success:
-                    await self._update_attributes({Attributes.MEDIA_POSITION: 0})
+                    await self._update_attributes({
+                        Attributes.STATE: States.ON,
+                        Attributes.MEDIA_POSITION: 0
+                    })
                 return StatusCodes.OK if success else StatusCodes.SERVER_ERROR
             
             elif cmd_id == Commands.NEXT:
                 success = await self._client.next_track()
+                if success:
+                    await self._try_update_status()
                 return StatusCodes.OK if success else StatusCodes.SERVER_ERROR
             
             elif cmd_id == Commands.PREVIOUS:
                 success = await self._client.previous_track()
+                if success:
+                    await self._try_update_status()
                 return StatusCodes.OK if success else StatusCodes.SERVER_ERROR
             
             elif cmd_id == Commands.VOLUME_UP:
@@ -155,13 +155,6 @@ class RvolutionMediaPlayer(MediaPlayer):
             elif cmd_id == Commands.VOLUME and params and "volume" in params:
                 return StatusCodes.NOT_IMPLEMENTED
             
-            elif cmd_id == Commands.SEEK and params and "media_position" in params:
-                position = int(params["media_position"])
-                success = await self._client.seek_to_position(position)
-                if success:
-                    await self._update_attributes({Attributes.MEDIA_POSITION: position})
-                return StatusCodes.OK if success else StatusCodes.SERVER_ERROR
-            
             else:
                 _LOG.warning(f"Unknown command for media player {self.id}: {cmd_id}")
                 return StatusCodes.NOT_IMPLEMENTED
@@ -170,7 +163,6 @@ class RvolutionMediaPlayer(MediaPlayer):
             _LOG.error(f"Connection error for media player {self.id}: {e}")
             await self._update_attributes({Attributes.STATE: States.UNAVAILABLE})
             self._attr_available = False
-            self._stop_status_updates()
             return StatusCodes.SERVICE_UNAVAILABLE
         
         except CommandError as e:
@@ -181,37 +173,8 @@ class RvolutionMediaPlayer(MediaPlayer):
             _LOG.error(f"Unexpected error for media player {self.id}: {e}", exc_info=True)
             return StatusCodes.SERVER_ERROR
 
-    def _start_status_updates(self):
-        """Start periodic status updates."""
-        if self._status_update_task is None or self._status_update_task.done():
-            self._status_update_task = asyncio.create_task(self._status_update_loop())
-
-    def _stop_status_updates(self):
-        """Stop periodic status updates."""
-        if self._status_update_task and not self._status_update_task.done():
-            self._status_update_task.cancel()
-            self._status_update_task = None
-
-    async def _status_update_loop(self):
-        """Periodic status update loop."""
-        try:
-            while True:
-                await asyncio.sleep(5.0)
-                
-                current_state = self.attributes.get(Attributes.STATE, States.UNKNOWN)
-                if current_state in [States.OFF, States.UNAVAILABLE]:
-                    break
-                
-                try:
-                    await self._update_device_status()
-                except Exception:
-                    pass
-                    
-        except asyncio.CancelledError:
-            pass
-
-    async def _update_device_status(self):
-        """Update device status from API."""
+    async def _try_update_status(self):
+        """Try to update device status - safe method that won't break anything."""
         try:
             status = await self._client.get_device_status()
             if not status:
@@ -235,17 +198,20 @@ class RvolutionMediaPlayer(MediaPlayer):
             else:
                 attributes_update[Attributes.STATE] = States.ON
             
-            # Media title
+            # Media title - clean up the filename
             playback_caption = status.get('playback_caption', '')
             if playback_caption:
                 if '/' in playback_caption:
                     title = playback_caption.split('/')[-1]
                 else:
                     title = playback_caption
+                # Remove file extension and quality markers
                 title = title.split('.mkv')[0].split('.mp4')[0].split('.avi')[0]
-                attributes_update[Attributes.MEDIA_TITLE] = title
+                title = title.replace('.', ' ').strip()
+                if title:
+                    attributes_update[Attributes.MEDIA_TITLE] = title
             
-            # Chapter as artist
+            # Chapter information as artist
             playback_extra_caption = status.get('playback_extra_caption', '')
             if playback_extra_caption:
                 attributes_update[Attributes.MEDIA_ARTIST] = playback_extra_caption
@@ -268,7 +234,7 @@ class RvolutionMediaPlayer(MediaPlayer):
             if isinstance(playback_mute, (int, bool)):
                 attributes_update[Attributes.MUTED] = bool(int(playback_mute))
             
-            # Resolution as album
+            # Video resolution as album info
             video_width = status.get('playback_video_width', 0)
             if video_width:
                 if video_width >= 3840:
@@ -281,11 +247,14 @@ class RvolutionMediaPlayer(MediaPlayer):
                     resolution = f"{video_width}x{status.get('playback_video_height', 0)}"
                 attributes_update[Attributes.MEDIA_ALBUM] = resolution
             
+            # Apply updates if we have any
             if attributes_update:
                 await self._update_attributes(attributes_update)
+                _LOG.debug(f"Updated status for {self.id}: {len(attributes_update)} attributes")
                 
-        except Exception:
-            pass
+        except Exception as e:
+            _LOG.debug(f"Status update failed for {self.id}: {e}")
+            # Don't propagate errors - this is optional functionality
 
     async def _update_attributes(self, attributes: dict[str, Any]) -> None:
         """Update entity attributes."""
@@ -299,6 +268,8 @@ class RvolutionMediaPlayer(MediaPlayer):
                 except Exception as update_error:
                     _LOG.debug(f"Could not update integration API: {update_error}")
             
+            _LOG.debug(f"Updated attributes for media player {self.id}: {attributes}")
+            
         except Exception as e:
             _LOG.error(f"Failed to update attributes for media player {self.id}: {e}")
 
@@ -310,9 +281,11 @@ class RvolutionMediaPlayer(MediaPlayer):
             if success:
                 await self._update_attributes({Attributes.STATE: States.ON})
                 self._attr_available = True
+                _LOG.debug(f"Media player {self.id} connection test successful")
             else:
                 await self._update_attributes({Attributes.STATE: States.UNAVAILABLE})
                 self._attr_available = False
+                _LOG.warning(f"Media player {self.id} connection test failed")
             
             return success
             
@@ -324,6 +297,8 @@ class RvolutionMediaPlayer(MediaPlayer):
 
     async def push_update(self) -> None:
         """Update entity state to prevent race conditions."""
+        _LOG.debug(f"Updating state for media player {self.id}")
+        
         try:
             connection_success = await self.test_connection()
             
@@ -333,9 +308,9 @@ class RvolutionMediaPlayer(MediaPlayer):
                     self._attr_available = True
                     
                     try:
-                        await self._update_device_status()
-                    except Exception:
-                        pass
+                        await self._try_update_status()
+                    except Exception as e:
+                        _LOG.debug(f"Initial status update failed for {self.id}: {e}")
                         
                 else:
                     await self._update_attributes({Attributes.STATE: States.UNKNOWN})
@@ -345,14 +320,11 @@ class RvolutionMediaPlayer(MediaPlayer):
                 self._attr_available = False
             
             self._initialization_complete = True
+            _LOG.info(f"Media player {self.id} state update completed - Available: {self._attr_available}")
             
         except Exception as e:
             _LOG.error(f"Failed to push update for media player {self.id}: {e}")
             self._attr_available = False
-
-    def cleanup(self):
-        """Cleanup resources when entity is removed."""
-        self._stop_status_updates()
 
     @property
     def available(self) -> bool:
