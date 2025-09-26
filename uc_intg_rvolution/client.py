@@ -252,42 +252,6 @@ class RvolutionClient:
         port = getattr(self._device_config, 'port', 80)
         return f"http://{self._device_config.ip_address}:{port}{endpoint}"
 
-    def _parse_simple_xml_status(self, xml_content: str) -> Dict[str, Any]:
-        """Simple XML status parsing without external dependencies."""
-        try:
-            status = {}
-            
-            # Extract key-value pairs from XML using string parsing
-            lines = xml_content.split('\n')
-            for line in lines:
-                if 'param name=' in line and 'value=' in line:
-                    try:
-                        # Extract name
-                        name_start = line.find('name="') + 6
-                        name_end = line.find('"', name_start)
-                        name = line[name_start:name_end]
-                        
-                        # Extract value  
-                        value_start = line.find('value="') + 7
-                        value_end = line.find('"', value_start)
-                        value = line[value_start:value_end]
-                        
-                        # Convert numeric values
-                        if value.isdigit():
-                            status[name] = int(value)
-                        elif value.replace('.', '', 1).isdigit():
-                            status[name] = float(value)
-                        else:
-                            status[name] = value
-                            
-                    except (ValueError, IndexError):
-                        continue
-            
-            return status
-            
-        except Exception:
-            return {}
-
     async def test_connection(self) -> bool:
         """Test device connectivity using non-disruptive Info command."""
         try:
@@ -421,20 +385,41 @@ class RvolutionClient:
         return await self.send_ir_command("Mute")
 
     async def get_device_status(self) -> Optional[Dict[str, Any]]:
-        """Get device status information with enhanced Dune-style status support."""
+        """Get device status information using skyrahfall repository approach."""
         try:
-            # Try Dune-style status command first
-            dune_status_url = self._build_url("/cgi-bin/do?cmd=status")
+            # Use skyrahfall repository endpoint strategy
+            combined_status = {}
             
+            # Try R_volution specific endpoints first (from skyrahfall repo)
+            playback_info_url = self._build_url("/as/playback/information")
+            system_info_url = self._build_url("/as/system/information")
+            
+            # Get playback information
             try:
-                response = await self._http_request(dune_status_url)
-                if response and '<command_result>' in response:
-                    status_data = self._parse_simple_xml_status(response)
-                    if status_data:
-                        _LOG.debug(f"Device status retrieved via Dune-style API")
-                        return status_data
+                response = await self._http_request(playback_info_url)
+                if response and response.strip().startswith('{'):
+                    import json
+                    playback_data = json.loads(response)
+                    combined_status.update(playback_data)
+                    _LOG.debug(f"Got playback info from /as/playback/information")
             except Exception as e:
-                _LOG.debug(f"Dune-style status failed: {e}")
+                _LOG.debug(f"Playback info endpoint failed: {e}")
+            
+            # Get system information
+            try:
+                response = await self._http_request(system_info_url)
+                if response and response.strip().startswith('{'):
+                    import json
+                    system_data = json.loads(response)
+                    combined_status.update(system_data)
+                    _LOG.debug(f"Got system info from /as/system/information")
+            except Exception as e:
+                _LOG.debug(f"System info endpoint failed: {e}")
+            
+            # If we got data from skyrahfall approach, return it
+            if combined_status:
+                _LOG.debug(f"Device status retrieved via skyrahfall approach")
+                return combined_status
             
             # Fallback to original endpoints
             status_urls = [

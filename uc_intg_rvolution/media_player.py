@@ -65,8 +65,6 @@ class RvolutionMediaPlayer(MediaPlayer):
             Attributes.MEDIA_TITLE: "",
             Attributes.MEDIA_ARTIST: "",
             Attributes.MEDIA_ALBUM: "",
-            Attributes.MEDIA_DURATION: 0,
-            Attributes.MEDIA_POSITION: 0,
         }
         
         super().__init__(
@@ -107,29 +105,26 @@ class RvolutionMediaPlayer(MediaPlayer):
             elif cmd_id == Commands.PLAY_PAUSE:
                 success = await self._client.play_pause()
                 if success:
-                    # Try to update status after play/pause
-                    await self._try_update_status()
+                    # Try to update status after play/pause command
+                    await self._safe_update_status()
                 return StatusCodes.OK if success else StatusCodes.SERVER_ERROR
             
             elif cmd_id == Commands.STOP:
                 success = await self._client.stop()
                 if success:
-                    await self._update_attributes({
-                        Attributes.STATE: States.ON,
-                        Attributes.MEDIA_POSITION: 0
-                    })
+                    await self._update_attributes({Attributes.STATE: States.ON})
                 return StatusCodes.OK if success else StatusCodes.SERVER_ERROR
             
             elif cmd_id == Commands.NEXT:
                 success = await self._client.next_track()
                 if success:
-                    await self._try_update_status()
+                    await self._safe_update_status()
                 return StatusCodes.OK if success else StatusCodes.SERVER_ERROR
             
             elif cmd_id == Commands.PREVIOUS:
                 success = await self._client.previous_track()
                 if success:
-                    await self._try_update_status()
+                    await self._safe_update_status()
                 return StatusCodes.OK if success else StatusCodes.SERVER_ERROR
             
             elif cmd_id == Commands.VOLUME_UP:
@@ -173,8 +168,8 @@ class RvolutionMediaPlayer(MediaPlayer):
             _LOG.error(f"Unexpected error for media player {self.id}: {e}", exc_info=True)
             return StatusCodes.SERVER_ERROR
 
-    async def _try_update_status(self):
-        """Try to update device status - safe method that won't break anything."""
+    async def _safe_update_status(self):
+        """Safely update status using skyrahfall approach - never throws errors."""
         try:
             status = await self._client.get_device_status()
             if not status:
@@ -182,79 +177,63 @@ class RvolutionMediaPlayer(MediaPlayer):
             
             attributes_update = {}
             
-            # Player state
-            player_state = status.get('player_state', '')
-            playback_state = status.get('playback_state', '')
+            # Map skyrahfall-style JSON response to attributes
+            # Based on skyrahfall repository structure
             
-            if player_state == 'file_playback':
-                if playback_state == 'playing':
+            # Title from JSON response
+            if 'title' in status and status['title']:
+                attributes_update[Attributes.MEDIA_TITLE] = status['title']
+            
+            # Artist from JSON response
+            if 'artist' in status and status['artist']:
+                attributes_update[Attributes.MEDIA_ARTIST] = status['artist']
+            
+            # Album from JSON response
+            if 'album' in status and status['album']:
+                attributes_update[Attributes.MEDIA_ALBUM] = status['album']
+            
+            # Duration from JSON response
+            if 'duration' in status:
+                duration = status['duration']
+                if isinstance(duration, (int, float)) and duration > 0:
+                    attributes_update[Attributes.MEDIA_DURATION] = int(duration)
+            
+            # Position from JSON response
+            if 'position' in status:
+                position = status['position']
+                if isinstance(position, (int, float)) and position >= 0:
+                    attributes_update[Attributes.MEDIA_POSITION] = int(position)
+            
+            # State from JSON response
+            if 'state' in status:
+                state_str = str(status['state']).lower()
+                if state_str == 'playing':
                     attributes_update[Attributes.STATE] = States.PLAYING
-                elif playback_state in ['paused', 'pause']:
+                elif state_str == 'paused':
                     attributes_update[Attributes.STATE] = States.PAUSED
-                else:
+                elif state_str == 'stopped':
                     attributes_update[Attributes.STATE] = States.ON
-            elif player_state in ['standby']:
-                attributes_update[Attributes.STATE] = States.OFF
-            else:
-                attributes_update[Attributes.STATE] = States.ON
             
-            # Media title - clean up the filename
-            playback_caption = status.get('playback_caption', '')
-            if playback_caption:
-                if '/' in playback_caption:
-                    title = playback_caption.split('/')[-1]
-                else:
-                    title = playback_caption
-                # Remove file extension and quality markers
-                title = title.split('.mkv')[0].split('.mp4')[0].split('.avi')[0]
-                title = title.replace('.', ' ').strip()
-                if title:
-                    attributes_update[Attributes.MEDIA_TITLE] = title
+            # Volume from JSON response
+            if 'volume' in status:
+                volume = status['volume']
+                if isinstance(volume, (int, float)):
+                    attributes_update[Attributes.VOLUME] = int(volume)
             
-            # Chapter information as artist
-            playback_extra_caption = status.get('playback_extra_caption', '')
-            if playback_extra_caption:
-                attributes_update[Attributes.MEDIA_ARTIST] = playback_extra_caption
-            
-            # Duration and position
-            playback_duration = status.get('playback_duration', 0)
-            if isinstance(playback_duration, (int, float)) and playback_duration > 0:
-                attributes_update[Attributes.MEDIA_DURATION] = int(playback_duration)
-            
-            playback_position = status.get('playback_position', 0)
-            if isinstance(playback_position, (int, float)) and playback_position >= 0:
-                attributes_update[Attributes.MEDIA_POSITION] = int(playback_position)
-            
-            # Volume and mute
-            playback_volume = status.get('playback_volume', None)
-            if isinstance(playback_volume, (int, float)):
-                attributes_update[Attributes.VOLUME] = int(playback_volume)
-            
-            playback_mute = status.get('playback_mute', None)
-            if isinstance(playback_mute, (int, bool)):
-                attributes_update[Attributes.MUTED] = bool(int(playback_mute))
-            
-            # Video resolution as album info
-            video_width = status.get('playback_video_width', 0)
-            if video_width:
-                if video_width >= 3840:
-                    resolution = "4K UHD"
-                elif video_width >= 1920:
-                    resolution = "Full HD"
-                elif video_width >= 1280:
-                    resolution = "HD"
-                else:
-                    resolution = f"{video_width}x{status.get('playback_video_height', 0)}"
-                attributes_update[Attributes.MEDIA_ALBUM] = resolution
+            # Mute from JSON response
+            if 'muted' in status:
+                muted = status['muted']
+                if isinstance(muted, bool):
+                    attributes_update[Attributes.MUTED] = muted
             
             # Apply updates if we have any
             if attributes_update:
                 await self._update_attributes(attributes_update)
-                _LOG.debug(f"Updated status for {self.id}: {len(attributes_update)} attributes")
+                _LOG.debug(f"Updated media status for {self.id}: {len(attributes_update)} attributes")
                 
         except Exception as e:
             _LOG.debug(f"Status update failed for {self.id}: {e}")
-            # Don't propagate errors - this is optional functionality
+            # Never propagate errors from status updates
 
     async def _update_attributes(self, attributes: dict[str, Any]) -> None:
         """Update entity attributes."""
@@ -307,8 +286,9 @@ class RvolutionMediaPlayer(MediaPlayer):
                     await self._update_attributes({Attributes.STATE: States.ON})
                     self._attr_available = True
                     
+                    # Try initial status update using skyrahfall approach
                     try:
-                        await self._try_update_status()
+                        await self._safe_update_status()
                     except Exception as e:
                         _LOG.debug(f"Initial status update failed for {self.id}: {e}")
                         
