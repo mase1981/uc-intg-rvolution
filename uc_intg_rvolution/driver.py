@@ -1,5 +1,5 @@
 """
-R_volution integration driver for Unfolded Circle Remote with connection stability fixes.
+R_volution integration driver for Unfolded Circle Remote.
 
 :copyright: (c) 2025 by Meir Miyara
 :license: MPL-2.0, see LICENSE for more details.
@@ -410,7 +410,9 @@ async def main():
         if config.is_configured():
             _LOG.info("Pre-configuring entities before UC Remote connection")
             _LOG.info(f"Configuration summary: {config.get_summary()}")
-            asyncio.create_task(_initialize_integration())
+            # CRITICAL FIX: Use await instead of create_task to block until entities are ready
+            # This prevents race condition where UC Remote tries to subscribe before entities exist
+            await _initialize_integration()
 
         await api.init(os.path.abspath(driver_path), setup_handler)
 
