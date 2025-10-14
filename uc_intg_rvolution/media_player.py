@@ -27,6 +27,7 @@ class RvolutionMediaPlayer(MediaPlayer):
         self._api = api
         self._attr_available = True
         self._initialization_complete = False
+        self._status_available = None  # Track if status endpoint works (None = unknown, True/False = known)
         
         entity_id = f"mp_{device_config.device_id}"
         
@@ -105,8 +106,9 @@ class RvolutionMediaPlayer(MediaPlayer):
             elif cmd_id == Commands.PLAY_PAUSE:
                 success = await self._client.play_pause()
                 if success:
-                    # Try to update status after play/pause command
-                    await self._safe_update_status()
+                    # Only try status update if we know it works
+                    if self._status_available is not False:
+                        await self._safe_update_status()
                 return StatusCodes.OK if success else StatusCodes.SERVER_ERROR
             
             elif cmd_id == Commands.STOP:
@@ -117,13 +119,13 @@ class RvolutionMediaPlayer(MediaPlayer):
             
             elif cmd_id == Commands.NEXT:
                 success = await self._client.next_track()
-                if success:
+                if success and self._status_available is not False:
                     await self._safe_update_status()
                 return StatusCodes.OK if success else StatusCodes.SERVER_ERROR
             
             elif cmd_id == Commands.PREVIOUS:
                 success = await self._client.previous_track()
-                if success:
+                if success and self._status_available is not False:
                     await self._safe_update_status()
                 return StatusCodes.OK if success else StatusCodes.SERVER_ERROR
             
@@ -169,42 +171,48 @@ class RvolutionMediaPlayer(MediaPlayer):
             return StatusCodes.SERVER_ERROR
 
     async def _safe_update_status(self):
-        """Safely update status using skyrahfall approach - never throws errors."""
+        """Safely update status - never throws errors, never affects availability."""
+        # If we already know status doesn't work, skip completely
+        if self._status_available is False:
+            return
+        
         try:
             status = await self._client.get_device_status()
+            
+            # No status data - mark as unavailable and stop trying
             if not status:
+                if self._status_available is None:
+                    _LOG.info(f"Device {self.id} does not provide status information - status polling disabled")
+                    self._status_available = False
                 return
+            
+            # Status works! Mark as available and process data
+            if self._status_available is None:
+                _LOG.info(f"Device {self.id} status endpoint available - enabling status updates")
+                self._status_available = True
             
             attributes_update = {}
             
-            # Map skyrahfall-style JSON response to attributes
-            # Based on skyrahfall repository structure
-            
-            # Title from JSON response
+            # Map status JSON response to attributes
             if 'title' in status and status['title']:
                 attributes_update[Attributes.MEDIA_TITLE] = status['title']
             
-            # Artist from JSON response
             if 'artist' in status and status['artist']:
                 attributes_update[Attributes.MEDIA_ARTIST] = status['artist']
             
-            # Album from JSON response
             if 'album' in status and status['album']:
                 attributes_update[Attributes.MEDIA_ALBUM] = status['album']
             
-            # Duration from JSON response
             if 'duration' in status:
                 duration = status['duration']
                 if isinstance(duration, (int, float)) and duration > 0:
                     attributes_update[Attributes.MEDIA_DURATION] = int(duration)
             
-            # Position from JSON response
             if 'position' in status:
                 position = status['position']
                 if isinstance(position, (int, float)) and position >= 0:
                     attributes_update[Attributes.MEDIA_POSITION] = int(position)
             
-            # State from JSON response
             if 'state' in status:
                 state_str = str(status['state']).lower()
                 if state_str == 'playing':
@@ -214,13 +222,11 @@ class RvolutionMediaPlayer(MediaPlayer):
                 elif state_str == 'stopped':
                     attributes_update[Attributes.STATE] = States.ON
             
-            # Volume from JSON response
             if 'volume' in status:
                 volume = status['volume']
                 if isinstance(volume, (int, float)):
                     attributes_update[Attributes.VOLUME] = int(volume)
             
-            # Mute from JSON response
             if 'muted' in status:
                 muted = status['muted']
                 if isinstance(muted, bool):
@@ -232,8 +238,11 @@ class RvolutionMediaPlayer(MediaPlayer):
                 _LOG.debug(f"Updated media status for {self.id}: {len(attributes_update)} attributes")
                 
         except Exception as e:
-            _LOG.debug(f"Status update failed for {self.id}: {e}")
-            # Never propagate errors from status updates
+            # Mark status as unavailable on first failure
+            if self._status_available is None:
+                _LOG.info(f"Device {self.id} status check failed - disabling status polling: {e}")
+                self._status_available = False
+            # Silently ignore all status update failures - they never affect availability
 
     async def _update_attributes(self, attributes: dict[str, Any]) -> None:
         """Update entity attributes."""
@@ -253,7 +262,7 @@ class RvolutionMediaPlayer(MediaPlayer):
             _LOG.error(f"Failed to update attributes for media player {self.id}: {e}")
 
     async def test_connection(self) -> bool:
-        """Test device connectivity."""
+        """Test device connectivity - uses IR command test, never status endpoint."""
         try:
             success = await self._client.test_connection()
             
@@ -275,10 +284,11 @@ class RvolutionMediaPlayer(MediaPlayer):
             return False
 
     async def push_update(self) -> None:
-        """Update entity state to prevent race conditions."""
+        """Update entity state - never depends on status endpoint."""
         _LOG.debug(f"Updating state for media player {self.id}")
         
         try:
+            # Connection test uses IR command, not status endpoint
             connection_success = await self.test_connection()
             
             if connection_success:
@@ -286,12 +296,9 @@ class RvolutionMediaPlayer(MediaPlayer):
                     await self._update_attributes({Attributes.STATE: States.ON})
                     self._attr_available = True
                     
-                    # Try initial status update using skyrahfall approach
-                    try:
+                    # Try initial status update ONLY if not yet determined
+                    if self._status_available is None:
                         await self._safe_update_status()
-                    except Exception as e:
-                        _LOG.debug(f"Initial status update failed for {self.id}: {e}")
-                        
                 else:
                     await self._update_attributes({Attributes.STATE: States.UNKNOWN})
                     self._attr_available = True
@@ -308,7 +315,7 @@ class RvolutionMediaPlayer(MediaPlayer):
 
     @property
     def available(self) -> bool:
-        """Return entity availability."""
+        """Return entity availability - based only on IR command connectivity."""
         return self._attr_available and self._initialization_complete
 
     @property
