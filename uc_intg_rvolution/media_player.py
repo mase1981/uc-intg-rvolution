@@ -66,6 +66,10 @@ class RvolutionMediaPlayer(MediaPlayer):
             Attributes.MEDIA_TITLE: "",
             Attributes.MEDIA_ARTIST: "",
             Attributes.MEDIA_ALBUM: "",
+            Attributes.MEDIA_IMAGE_URL: "",
+            Attributes.MEDIA_TYPE: "",
+            Attributes.MEDIA_DURATION: 0,
+            Attributes.MEDIA_POSITION: 0
         }
         
         super().__init__(
@@ -106,7 +110,7 @@ class RvolutionMediaPlayer(MediaPlayer):
             elif cmd_id == Commands.PLAY_PAUSE:
                 success = await self._client.play_pause()
                 if success:
-                    # Only try status update if we know it works
+                    # Update status to reflect state change
                     if self._status_available is not False:
                         await self._safe_update_status()
                 return StatusCodes.OK if success else StatusCodes.SERVER_ERROR
@@ -114,7 +118,10 @@ class RvolutionMediaPlayer(MediaPlayer):
             elif cmd_id == Commands.STOP:
                 success = await self._client.stop()
                 if success:
-                    await self._update_attributes({Attributes.STATE: States.ON})
+                    await self._update_attributes({
+                        Attributes.STATE: States.ON,
+                        Attributes.MEDIA_POSITION: 0
+                    })
                 return StatusCodes.OK if success else StatusCodes.SERVER_ERROR
             
             elif cmd_id == Commands.NEXT:
@@ -171,66 +178,139 @@ class RvolutionMediaPlayer(MediaPlayer):
             return StatusCodes.SERVER_ERROR
 
     async def _safe_update_status(self):
-        """Safely update status - never throws errors, never affects availability."""
+        """
+        Safely update status with R_video API integration.
+        Provides rich media metadata when available, never affects entity availability.
+        """
         # If we already know status doesn't work, skip completely
         if self._status_available is False:
             return
         
         try:
-            status = await self._client.get_device_status()
+            # Get enhanced status from R_video API
+            enhanced_status = await self._client.get_enhanced_status()
             
             # No status data - mark as unavailable and stop trying
-            if not status:
+            if not enhanced_status:
                 if self._status_available is None:
-                    _LOG.info(f"Device {self.id} does not provide status information - status polling disabled")
+                    _LOG.info(f"Device {self.id} does not provide R_video API - basic mode enabled")
                     self._status_available = False
                 return
             
             # Status works! Mark as available and process data
             if self._status_available is None:
-                _LOG.info(f"Device {self.id} status endpoint available - enabling status updates")
+                _LOG.info(f"Device {self.id} R_video API available - enhanced media display enabled")
                 self._status_available = True
             
             attributes_update = {}
             
-            # Map status JSON response to attributes
-            if 'title' in status and status['title']:
-                attributes_update[Attributes.MEDIA_TITLE] = status['title']
+            # Extract playback information
+            playback_info = enhanced_status.get('playback_info', {})
+            is_playing = enhanced_status.get('is_playing', False)
             
-            if 'artist' in status and status['artist']:
-                attributes_update[Attributes.MEDIA_ARTIST] = status['artist']
+            # Update volume and mute from playback info
+            if 'playback_volume' in playback_info:
+                try:
+                    volume = int(playback_info['playback_volume'])
+                    attributes_update[Attributes.VOLUME] = volume
+                except (ValueError, TypeError):
+                    pass
             
-            if 'album' in status and status['album']:
-                attributes_update[Attributes.MEDIA_ALBUM] = status['album']
-            
-            if 'duration' in status:
-                duration = status['duration']
-                if isinstance(duration, (int, float)) and duration > 0:
-                    attributes_update[Attributes.MEDIA_DURATION] = int(duration)
-            
-            if 'position' in status:
-                position = status['position']
-                if isinstance(position, (int, float)) and position >= 0:
-                    attributes_update[Attributes.MEDIA_POSITION] = int(position)
-            
-            if 'state' in status:
-                state_str = str(status['state']).lower()
-                if state_str == 'playing':
-                    attributes_update[Attributes.STATE] = States.PLAYING
-                elif state_str == 'paused':
-                    attributes_update[Attributes.STATE] = States.PAUSED
-                elif state_str == 'stopped':
-                    attributes_update[Attributes.STATE] = States.ON
-            
-            if 'volume' in status:
-                volume = status['volume']
-                if isinstance(volume, (int, float)):
-                    attributes_update[Attributes.VOLUME] = int(volume)
-            
-            if 'muted' in status:
-                muted = status['muted']
-                if isinstance(muted, bool):
+            if 'playback_mute' in playback_info:
+                try:
+                    muted = int(playback_info['playback_mute']) == 1
                     attributes_update[Attributes.MUTED] = muted
+                except (ValueError, TypeError):
+                    pass
+            
+            # Update playback state
+            playback_state = playback_info.get('playback_state', '')
+            if playback_state == 'playing':
+                attributes_update[Attributes.STATE] = States.PLAYING
+            elif playback_state == 'paused':
+                attributes_update[Attributes.STATE] = States.PAUSED
+            elif playback_state == 'buffering':
+                attributes_update[Attributes.STATE] = States.BUFFERING
+            elif is_playing:
+                # In file_playback mode but no explicit state
+                attributes_update[Attributes.STATE] = States.PLAYING
+            else:
+                # Not playing, in navigator/menu
+                attributes_update[Attributes.STATE] = States.ON
+                # Clear media info when not playing
+                attributes_update[Attributes.MEDIA_TITLE] = ""
+                attributes_update[Attributes.MEDIA_ARTIST] = ""
+                attributes_update[Attributes.MEDIA_ALBUM] = ""
+                attributes_update[Attributes.MEDIA_IMAGE_URL] = ""
+                attributes_update[Attributes.MEDIA_TYPE] = ""
+                attributes_update[Attributes.MEDIA_DURATION] = 0
+                attributes_update[Attributes.MEDIA_POSITION] = 0
+            
+            # If playing, extract rich media metadata
+            if is_playing:
+                media = enhanced_status.get('media')
+                
+                # Update duration and position
+                if 'playback_duration' in playback_info:
+                    try:
+                        duration = int(playback_info['playback_duration'])
+                        attributes_update[Attributes.MEDIA_DURATION] = duration
+                    except (ValueError, TypeError):
+                        pass
+                
+                if 'playback_position' in playback_info:
+                    try:
+                        position = int(playback_info['playback_position'])
+                        attributes_update[Attributes.MEDIA_POSITION] = position
+                    except (ValueError, TypeError):
+                        pass
+                
+                # Process media metadata if available
+                if media:
+                    media_type = media.get('Type', '')
+                    
+                    if media_type == 'Movie':
+                        # Movie: Show title and poster
+                        title = media.get('Title', '')
+                        poster_url = media.get('PosterUrl', '')
+                        
+                        attributes_update[Attributes.MEDIA_TITLE] = title
+                        attributes_update[Attributes.MEDIA_TYPE] = "MOVIE"
+                        attributes_update[Attributes.MEDIA_IMAGE_URL] = poster_url
+                        
+                        # Clear TV show fields
+                        attributes_update[Attributes.MEDIA_ARTIST] = ""
+                        attributes_update[Attributes.MEDIA_ALBUM] = ""
+                        
+                        _LOG.debug(f"Updated movie metadata: {title}")
+                    
+                    elif media_type == 'TVShowEpisode':
+                        # TV Show: Show episode title, series name, season/episode, poster
+                        episode_title = media.get('Title', '')
+                        series_name = media.get('TvShowName', '')
+                        season = media.get('Season', 0)
+                        episode = media.get('Episode', 0)
+                        poster_url = media.get('PosterUrl', '')
+                        
+                        # Format season/episode info
+                        season_episode = f"Season {season} Episode {episode}" if season and episode else ""
+                        
+                        attributes_update[Attributes.MEDIA_TITLE] = episode_title
+                        attributes_update[Attributes.MEDIA_ARTIST] = series_name
+                        attributes_update[Attributes.MEDIA_ALBUM] = season_episode
+                        attributes_update[Attributes.MEDIA_TYPE] = "TVSHOW"
+                        attributes_update[Attributes.MEDIA_IMAGE_URL] = poster_url
+                        
+                        _LOG.debug(f"Updated TV show metadata: {series_name} - {episode_title}")
+                    
+                    else:
+                        # Unknown media type - show basic info
+                        title = media.get('Title', '')
+                        if title:
+                            attributes_update[Attributes.MEDIA_TITLE] = title
+                            attributes_update[Attributes.MEDIA_TYPE] = "VIDEO"
+                        
+                        _LOG.debug(f"Updated media metadata: {title} (type: {media_type})")
             
             # Apply updates if we have any
             if attributes_update:

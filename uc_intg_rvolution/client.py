@@ -6,8 +6,10 @@ R_volution Device Client Implementation
 """
 
 import asyncio
+import json
 import logging
 import time
+import xml.etree.ElementTree as ET
 from typing import Any, Dict, List, Optional
 
 import aiohttp
@@ -39,6 +41,7 @@ class RvolutionClient:
         self._base_timeout = 10
         self.connection_established = False
         self._last_successful_request = 0
+        self._rvideo_available = None  # Track R_video API availability
         
         # Device-specific command sets
         self._amlogic_commands = {
@@ -247,10 +250,14 @@ class RvolutionClient:
             self.connection_established = False
             raise ConnectionError(f"Unexpected error: {e}")
 
-    def _build_url(self, endpoint: str) -> str:
-        """Build URL with proper port handling."""
+    def _build_ir_url(self, endpoint: str) -> str:
+        """Build URL for IR commands (port 80 or configured port)."""
         port = getattr(self._device_config, 'port', 80)
         return f"http://{self._device_config.ip_address}:{port}{endpoint}"
+
+    def _build_rvideo_url(self, endpoint: str) -> str:
+        """Build URL for R_video API (always port 8890)."""
+        return f"http://{self._device_config.ip_address}:8890{endpoint}"
 
     async def test_connection(self) -> bool:
         """Test device connectivity using non-disruptive Info command."""
@@ -263,7 +270,7 @@ class RvolutionClient:
             else:
                 test_ir_code = self._player_commands["Info"]
             
-            url = self._build_url(f"/cgi-bin/do?cmd=ir_code&ir_code={test_ir_code}")
+            url = self._build_ir_url(f"/cgi-bin/do?cmd=ir_code&ir_code={test_ir_code}")
             response = await self._http_request(url)
             
             if response is not None:
@@ -298,6 +305,145 @@ class RvolutionClient:
             self.connection_established = False
             return False
 
+    async def get_playback_information(self) -> Optional[Dict[str, Any]]:
+        """
+        Get playback information from R_video API (port 8890).
+        Returns parsed XML data as dictionary with playback state, position, duration, etc.
+        """
+        try:
+            url = self._build_rvideo_url("/PlaybackInformation")
+            response = await self._http_request(url)
+            
+            if not response:
+                return None
+            
+            # Parse JSON wrapper
+            json_data = json.loads(response)
+            xml_content = json_data.get('XmlContent', '')
+            
+            if not xml_content:
+                _LOG.debug("No XML content in PlaybackInformation response")
+                return None
+            
+            # Parse XML (JSON automatically unescapes \u003C to <)
+            root = ET.fromstring(xml_content)
+            
+            # Extract all params into dictionary
+            playback_info = {}
+            for param in root.findall('.//param'):
+                name = param.get('name')
+                value = param.get('value')
+                if name and value:
+                    playback_info[name] = value
+            
+            _LOG.debug(f"Playback info retrieved: player_state={playback_info.get('player_state')}, "
+                      f"playback_state={playback_info.get('playback_state')}")
+            
+            return playback_info
+            
+        except json.JSONDecodeError as e:
+            _LOG.debug(f"Failed to parse PlaybackInformation JSON: {e}")
+            return None
+        except ET.ParseError as e:
+            _LOG.debug(f"Failed to parse PlaybackInformation XML: {e}")
+            return None
+        except Exception as e:
+            _LOG.debug(f"Error getting playback information: {e}")
+            return None
+
+    async def get_last_media(self) -> Optional[Dict[str, Any]]:
+        """
+        Get last/current media information from R_video API (port 8890).
+        Returns parsed JSON with media metadata (title, poster, episode info, etc.).
+        """
+        try:
+            url = self._build_rvideo_url("/LastMedia")
+            response = await self._http_request(url)
+            
+            if not response:
+                return None
+            
+            # Parse JSON
+            media_data = json.loads(response)
+            
+            # Check for error
+            if media_data.get('ErrorCode') != 'None':
+                _LOG.debug(f"LastMedia returned error: {media_data.get('ErrorCode')}")
+                return None
+            
+            # Extract media info
+            media = media_data.get('Media')
+            if not media:
+                _LOG.debug("No media data in LastMedia response")
+                return None
+            
+            _LOG.debug(f"Media info retrieved: Title={media.get('Title')}, "
+                      f"Type={media.get('Type')}, "
+                      f"TvShowName={media.get('TvShowName')}")
+            
+            return media
+            
+        except json.JSONDecodeError as e:
+            _LOG.debug(f"Failed to parse LastMedia JSON: {e}")
+            return None
+        except Exception as e:
+            _LOG.debug(f"Error getting last media: {e}")
+            return None
+
+    async def get_enhanced_status(self) -> Optional[Dict[str, Any]]:
+        """
+        Get comprehensive status combining playback info and media metadata.
+        
+        Returns combined dictionary with:
+        - playback_info: XML data (position, duration, state, volume, etc.)
+        - media: JSON data (title, poster, episode info, etc.)
+        - is_playing: boolean indicating active playback
+        """
+        # First time check - test R_video API availability
+        if self._rvideo_available is None:
+            _LOG.info(f"Testing R_video API availability for {self._device_config.name}...")
+            playback_test = await self.get_playback_information()
+            if playback_test is None:
+                _LOG.info(f"R_video API not available for {self._device_config.name} - enhanced status disabled")
+                self._rvideo_available = False
+                return None
+            else:
+                _LOG.info(f"R_video API available for {self._device_config.name} - enhanced status enabled")
+                self._rvideo_available = True
+        
+        # If we know R_video is unavailable, skip all requests
+        if self._rvideo_available is False:
+            return None
+        
+        try:
+            # Get both playback info and media metadata
+            playback_info = await self.get_playback_information()
+            
+            if not playback_info:
+                return None
+            
+            # Check if currently playing media
+            player_state = playback_info.get('player_state', '')
+            is_playing = player_state == 'file_playback'
+            
+            # Only get media metadata if actually playing
+            media = None
+            if is_playing:
+                media = await self.get_last_media()
+            
+            enhanced_status = {
+                'playback_info': playback_info,
+                'media': media,
+                'is_playing': is_playing,
+                'player_state': player_state
+            }
+            
+            return enhanced_status
+            
+        except Exception as e:
+            _LOG.debug(f"Error getting enhanced status: {e}")
+            return None
+
     async def send_ir_command(self, command: str) -> bool:
         """Send IR command to device."""
         try:
@@ -311,7 +457,7 @@ class RvolutionClient:
                 return False
             
             ir_code = command_set[command]
-            url = self._build_url(f"/cgi-bin/do?cmd=ir_code&ir_code={ir_code}")
+            url = self._build_ir_url(f"/cgi-bin/do?cmd=ir_code&ir_code={ir_code}")
             
             _LOG.debug(f"Sending IR command '{command}' to {self._device_config.name}")
             
@@ -385,54 +531,28 @@ class RvolutionClient:
         return await self.send_ir_command("Mute")
 
     async def get_device_status(self) -> Optional[Dict[str, Any]]:
-        """Get device status information using skyrahfall repository approach."""
+        """
+        Get device status information.
+        Legacy method - maintained for backward compatibility.
+        Use get_enhanced_status() for rich media metadata.
+        """
         try:
-            # Use skyrahfall repository endpoint strategy
-            combined_status = {}
+            # Try enhanced status first (R_video API)
+            enhanced = await self.get_enhanced_status()
+            if enhanced:
+                return enhanced
             
-            # Try R_volution specific endpoints first (from skyrahfall repo)
-            playback_info_url = self._build_url("/as/playback/information")
-            system_info_url = self._build_url("/as/system/information")
-            
-            # Get playback information
-            try:
-                response = await self._http_request(playback_info_url)
-                if response and response.strip().startswith('{'):
-                    import json
-                    playback_data = json.loads(response)
-                    combined_status.update(playback_data)
-                    _LOG.debug(f"Got playback info from /as/playback/information")
-            except Exception as e:
-                _LOG.debug(f"Playback info endpoint failed: {e}")
-            
-            # Get system information
-            try:
-                response = await self._http_request(system_info_url)
-                if response and response.strip().startswith('{'):
-                    import json
-                    system_data = json.loads(response)
-                    combined_status.update(system_data)
-                    _LOG.debug(f"Got system info from /as/system/information")
-            except Exception as e:
-                _LOG.debug(f"System info endpoint failed: {e}")
-            
-            # If we got data from skyrahfall approach, return it
-            if combined_status:
-                _LOG.debug(f"Device status retrieved via skyrahfall approach")
-                return combined_status
-            
-            # Fallback to original endpoints
+            # Fallback to basic status endpoints
             status_urls = [
-                self._build_url("/device/status"),
-                self._build_url("/device/info"),
-                self._build_url("/as/system/information")
+                self._build_ir_url("/device/status"),
+                self._build_ir_url("/device/info"),
+                self._build_ir_url("/as/system/information")
             ]
             
             for url in status_urls:
                 try:
                     response = await self._http_request(url)
                     if response and response.strip().startswith('{'):
-                        import json
                         status_data = json.loads(response)
                         _LOG.debug(f"Device status retrieved from {url}")
                         return status_data
