@@ -261,8 +261,8 @@ class RvolutionClient:
         return f"http://{self._device_config.ip_address}:{port}{endpoint}"
 
     def _build_rvideo_url(self, endpoint: str) -> str:
-        """Build URL for R_video API (always port 8890)."""
-        return f"http://{self._device_config.ip_address}:8890{endpoint}"
+        """Build URL for R_video API (always port 8990)."""
+        return f"http://{self._device_config.ip_address}:8990{endpoint}"
 
     async def test_connection(self) -> bool:
         """Test device connectivity using non-disruptive Info command."""
