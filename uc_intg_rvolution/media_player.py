@@ -170,22 +170,39 @@ class RvolutionMediaPlayer(MediaPlayer):
             
             elif cmd_id == Commands.VOLUME_UP:
                 success = await self._client.volume_up()
+                if success:
+                    # Optimistically update volume (R_volution increments by 5)
+                    current_volume = self.attributes.get(Attributes.VOLUME, 50)
+                    new_volume = min(100, current_volume + 5)
+                    await self._update_attributes({Attributes.VOLUME: new_volume})
+                    _LOG.debug(f"Volume up: {current_volume} → {new_volume}")
                 return StatusCodes.OK if success else StatusCodes.SERVER_ERROR
             
             elif cmd_id == Commands.VOLUME_DOWN:
                 success = await self._client.volume_down()
+                if success:
+                    # Optimistically update volume (R_volution decrements by 5)
+                    current_volume = self.attributes.get(Attributes.VOLUME, 50)
+                    new_volume = max(0, current_volume - 5)
+                    await self._update_attributes({Attributes.VOLUME: new_volume})
+                    _LOG.debug(f"Volume down: {current_volume} → {new_volume}")
                 return StatusCodes.OK if success else StatusCodes.SERVER_ERROR
             
             elif cmd_id == Commands.MUTE_TOGGLE or cmd_id == Commands.MUTE:
                 success = await self._client.mute()
                 if success:
-                    await self._update_attributes({Attributes.MUTED: True})
+                    # Toggle mute state
+                    current_mute = self.attributes.get(Attributes.MUTED, False)
+                    new_mute = not current_mute
+                    await self._update_attributes({Attributes.MUTED: new_mute})
+                    _LOG.debug(f"Mute toggle: {current_mute} → {new_mute}")
                 return StatusCodes.OK if success else StatusCodes.SERVER_ERROR
             
             elif cmd_id == Commands.UNMUTE:
                 success = await self._client.mute()
                 if success:
                     await self._update_attributes({Attributes.MUTED: False})
+                    _LOG.debug("Unmute")
                 return StatusCodes.OK if success else StatusCodes.SERVER_ERROR
             
             elif cmd_id == Commands.VOLUME and params and "volume" in params:
@@ -210,6 +227,10 @@ class RvolutionMediaPlayer(MediaPlayer):
             return StatusCodes.SERVER_ERROR
 
     async def _safe_update_status(self):
+        """
+        Safely update status with R_video API integration.
+        Provides rich media metadata when available, never affects entity availability.
+        """
         # If we already know status doesn't work, skip completely
         if self._status_available is False:
             return
@@ -353,6 +374,7 @@ class RvolutionMediaPlayer(MediaPlayer):
             # Silently ignore all status update failures - they never affect availability
 
     async def _update_attributes(self, attributes: dict[str, Any]) -> None:
+        """Update entity attributes."""
         try:
             for key, value in attributes.items():
                 self.attributes[key] = value
@@ -369,6 +391,7 @@ class RvolutionMediaPlayer(MediaPlayer):
             _LOG.error(f"Failed to update attributes for media player {self.id}: {e}")
 
     async def test_connection(self) -> bool:
+        """Test device connectivity - uses IR command test, never status endpoint."""
         try:
             success = await self._client.test_connection()
             
@@ -394,6 +417,7 @@ class RvolutionMediaPlayer(MediaPlayer):
         _LOG.debug(f"Updating state for media player {self.id}")
         
         try:
+            # Connection test uses IR command, not status endpoint
             connection_success = await self.test_connection()
             
             if connection_success:
@@ -423,6 +447,7 @@ class RvolutionMediaPlayer(MediaPlayer):
 
     @property
     def available(self) -> bool:
+        """Return entity availability - based only on IR command connectivity."""
         return self._attr_available and self._initialization_complete
 
     @property
