@@ -7,7 +7,7 @@ R_volution Media Player entity
 
 import asyncio
 import logging
-from typing import Any
+from typing import Any, Optional
 
 import ucapi
 from ucapi import StatusCodes
@@ -28,6 +28,8 @@ class RvolutionMediaPlayer(MediaPlayer):
         self._attr_available = True
         self._initialization_complete = False
         self._status_available = None  # Track if status endpoint works (None = unknown, True/False = known)
+        self._polling_task: Optional[asyncio.Task] = None
+        self._polling_interval = 5.0  # Poll every 5 seconds
         
         entity_id = f"mp_{device_config.device_id}"
         
@@ -83,6 +85,36 @@ class RvolutionMediaPlayer(MediaPlayer):
         
         _LOG.info(f"Created media player entity: {entity_id} for {device_config.name}")
 
+    def _start_polling(self):
+        """Start background polling task for status updates."""
+        if self._polling_task is None or self._polling_task.done():
+            self._polling_task = asyncio.create_task(self._status_polling_loop())
+            _LOG.info(f"Started status polling for media player {self.id}")
+
+    def _stop_polling(self):
+        """Stop background polling task."""
+        if self._polling_task and not self._polling_task.done():
+            self._polling_task.cancel()
+            _LOG.info(f"Stopped status polling for media player {self.id}")
+
+    async def _status_polling_loop(self):
+        """Background task for continuous status updates."""
+        _LOG.debug(f"Status polling loop started for {self.id}")
+        while True:
+            try:
+                await asyncio.sleep(self._polling_interval)
+                
+                # Only poll if status is available or unknown
+                if self._status_available is not False:
+                    await self._safe_update_status()
+                    
+            except asyncio.CancelledError:
+                _LOG.debug(f"Status polling cancelled for {self.id}")
+                break
+            except Exception as e:
+                _LOG.debug(f"Polling error for {self.id}: {e}")
+                # Continue polling even on errors
+
     async def _cmd_handler(self, entity: ucapi.Entity, cmd_id: str, params: dict[str, Any] | None) -> StatusCodes:
         _LOG.debug(f"Media player {self.id} received command: {cmd_id}")
         
@@ -110,7 +142,7 @@ class RvolutionMediaPlayer(MediaPlayer):
             elif cmd_id == Commands.PLAY_PAUSE:
                 success = await self._client.play_pause()
                 if success:
-                    # Update status to reflect state change
+                    # Trigger immediate status update
                     if self._status_available is not False:
                         await self._safe_update_status()
                 return StatusCodes.OK if success else StatusCodes.SERVER_ERROR
@@ -178,10 +210,6 @@ class RvolutionMediaPlayer(MediaPlayer):
             return StatusCodes.SERVER_ERROR
 
     async def _safe_update_status(self):
-        """
-        Safely update status with R_video API integration.
-        Provides rich media metadata when available, never affects entity availability.
-        """
         # If we already know status doesn't work, skip completely
         if self._status_available is False:
             return
@@ -282,7 +310,7 @@ class RvolutionMediaPlayer(MediaPlayer):
                         attributes_update[Attributes.MEDIA_ARTIST] = ""
                         attributes_update[Attributes.MEDIA_ALBUM] = ""
                         
-                        _LOG.debug(f"Updated movie metadata: {title}")
+                        _LOG.info(f"Updated movie: {title}")
                     
                     elif media_type == 'TVShowEpisode':
                         # TV Show: Show episode title, series name, season/episode, poster
@@ -301,7 +329,7 @@ class RvolutionMediaPlayer(MediaPlayer):
                         attributes_update[Attributes.MEDIA_TYPE] = "TVSHOW"
                         attributes_update[Attributes.MEDIA_IMAGE_URL] = poster_url
                         
-                        _LOG.debug(f"Updated TV show metadata: {series_name} - {episode_title}")
+                        _LOG.info(f"Updated TV show: {series_name} - {episode_title} ({season_episode})")
                     
                     else:
                         # Unknown media type - show basic info
@@ -310,12 +338,12 @@ class RvolutionMediaPlayer(MediaPlayer):
                             attributes_update[Attributes.MEDIA_TITLE] = title
                             attributes_update[Attributes.MEDIA_TYPE] = "VIDEO"
                         
-                        _LOG.debug(f"Updated media metadata: {title} (type: {media_type})")
+                        _LOG.debug(f"Updated media: {title} (type: {media_type})")
             
             # Apply updates if we have any
             if attributes_update:
                 await self._update_attributes(attributes_update)
-                _LOG.debug(f"Updated media status for {self.id}: {len(attributes_update)} attributes")
+                _LOG.debug(f"Updated {len(attributes_update)} attributes for {self.id}")
                 
         except Exception as e:
             # Mark status as unavailable on first failure
@@ -325,7 +353,6 @@ class RvolutionMediaPlayer(MediaPlayer):
             # Silently ignore all status update failures - they never affect availability
 
     async def _update_attributes(self, attributes: dict[str, Any]) -> None:
-        """Update entity attributes."""
         try:
             for key, value in attributes.items():
                 self.attributes[key] = value
@@ -336,13 +363,12 @@ class RvolutionMediaPlayer(MediaPlayer):
                 except Exception as update_error:
                     _LOG.debug(f"Could not update integration API: {update_error}")
             
-            _LOG.debug(f"Updated attributes for media player {self.id}: {attributes}")
+            _LOG.debug(f"Updated attributes for media player {self.id}: {list(attributes.keys())}")
             
         except Exception as e:
             _LOG.error(f"Failed to update attributes for media player {self.id}: {e}")
 
     async def test_connection(self) -> bool:
-        """Test device connectivity - uses IR command test, never status endpoint."""
         try:
             success = await self._client.test_connection()
             
@@ -364,11 +390,10 @@ class RvolutionMediaPlayer(MediaPlayer):
             return False
 
     async def push_update(self) -> None:
-        """Update entity state - never depends on status endpoint."""
+        """Update entity state and start polling."""
         _LOG.debug(f"Updating state for media player {self.id}")
         
         try:
-            # Connection test uses IR command, not status endpoint
             connection_success = await self.test_connection()
             
             if connection_success:
@@ -379,6 +404,9 @@ class RvolutionMediaPlayer(MediaPlayer):
                     # Try initial status update ONLY if not yet determined
                     if self._status_available is None:
                         await self._safe_update_status()
+                    
+                    # Start polling for continuous updates
+                    self._start_polling()
                 else:
                     await self._update_attributes({Attributes.STATE: States.UNKNOWN})
                     self._attr_available = True
@@ -395,7 +423,6 @@ class RvolutionMediaPlayer(MediaPlayer):
 
     @property
     def available(self) -> bool:
-        """Return entity availability - based only on IR command connectivity."""
         return self._attr_available and self._initialization_complete
 
     @property

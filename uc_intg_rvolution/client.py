@@ -196,8 +196,7 @@ class RvolutionClient:
             await self._session.close()
             await asyncio.sleep(0.25)
 
-    async def _http_request(self, url: str, retry_count: int = 0) -> Optional[str]:
-        """Make HTTP request with device stability handling."""
+    async def _http_request(self, url: str, method: str = "GET", retry_count: int = 0) -> Optional[str]:
         await self._ensure_session()
         
         # Rate limiting for device stability
@@ -208,7 +207,13 @@ class RvolutionClient:
         self._last_request_time = time.time()
         
         try:
-            async with self._session.get(url, ssl=False) as response:
+            # Use appropriate HTTP method
+            if method.upper() == "POST":
+                request = self._session.post(url, ssl=False)
+            else:
+                request = self._session.get(url, ssl=False)
+            
+            async with request as response:
                 content = await response.text()
                 
                 if response.status == 200:
@@ -219,7 +224,7 @@ class RvolutionClient:
                     _LOG.warning(f"HTTP {response.status} from {self._device_config.ip_address}")
                     if retry_count < self._max_retries:
                         await asyncio.sleep(2.0)
-                        return await self._http_request(url, retry_count + 1)
+                        return await self._http_request(url, method, retry_count + 1)
                     return None
                     
         except aiohttp.ClientConnectorError as e:
@@ -231,7 +236,7 @@ class RvolutionClient:
                 await asyncio.sleep(5.0)
                 await self.close()
                 await self._ensure_session()
-                return await self._http_request(url, retry_count + 1)
+                return await self._http_request(url, method, retry_count + 1)
             else:
                 raise ConnectionError(f"Failed to connect after {self._max_retries + 1} attempts")
                 
@@ -241,7 +246,7 @@ class RvolutionClient:
             
             if retry_count < self._max_retries:
                 await asyncio.sleep(3.0)
-                return await self._http_request(url, retry_count + 1)
+                return await self._http_request(url, method, retry_count + 1)
             else:
                 raise ConnectionError(f"Request timeout after {self._max_retries + 1} attempts")
                 
@@ -271,7 +276,7 @@ class RvolutionClient:
                 test_ir_code = self._player_commands["Info"]
             
             url = self._build_ir_url(f"/cgi-bin/do?cmd=ir_code&ir_code={test_ir_code}")
-            response = await self._http_request(url)
+            response = await self._http_request(url, method="GET")
             
             if response is not None:
                 # Check for valid R_volution response indicators
@@ -306,13 +311,10 @@ class RvolutionClient:
             return False
 
     async def get_playback_information(self) -> Optional[Dict[str, Any]]:
-        """
-        Get playback information from R_video API (port 8890).
-        Returns parsed XML data as dictionary with playback state, position, duration, etc.
-        """
         try:
             url = self._build_rvideo_url("/PlaybackInformation")
-            response = await self._http_request(url)
+            _LOG.debug(f"Requesting playback info via POST: {url}")
+            response = await self._http_request(url, method="POST")
             
             if not response:
                 return None
@@ -352,13 +354,10 @@ class RvolutionClient:
             return None
 
     async def get_last_media(self) -> Optional[Dict[str, Any]]:
-        """
-        Get last/current media information from R_video API (port 8890).
-        Returns parsed JSON with media metadata (title, poster, episode info, etc.).
-        """
         try:
             url = self._build_rvideo_url("/LastMedia")
-            response = await self._http_request(url)
+            _LOG.debug(f"Requesting last media via POST: {url}")
+            response = await self._http_request(url, method="POST")
             
             if not response:
                 return None
@@ -391,15 +390,6 @@ class RvolutionClient:
             return None
 
     async def get_enhanced_status(self) -> Optional[Dict[str, Any]]:
-        """
-        Get comprehensive status combining playback info and media metadata.
-        
-        Returns combined dictionary with:
-        - playback_info: XML data (position, duration, state, volume, etc.)
-        - media: JSON data (title, poster, episode info, etc.)
-        - is_playing: boolean indicating active playback
-        """
-        # First time check - test R_video API availability
         if self._rvideo_available is None:
             _LOG.info(f"Testing R_video API availability for {self._device_config.name}...")
             playback_test = await self.get_playback_information()
@@ -411,7 +401,6 @@ class RvolutionClient:
                 _LOG.info(f"R_video API available for {self._device_config.name} - enhanced status enabled")
                 self._rvideo_available = True
         
-        # If we know R_video is unavailable, skip all requests
         if self._rvideo_available is False:
             return None
         
@@ -461,7 +450,7 @@ class RvolutionClient:
             
             _LOG.debug(f"Sending IR command '{command}' to {self._device_config.name}")
             
-            response = await self._http_request(url)
+            response = await self._http_request(url, method="GET")
             
             if response is not None:
                 # Check for success indicators in response
@@ -531,11 +520,6 @@ class RvolutionClient:
         return await self.send_ir_command("Mute")
 
     async def get_device_status(self) -> Optional[Dict[str, Any]]:
-        """
-        Get device status information.
-        Legacy method - maintained for backward compatibility.
-        Use get_enhanced_status() for rich media metadata.
-        """
         try:
             # Try enhanced status first (R_video API)
             enhanced = await self.get_enhanced_status()
@@ -551,7 +535,7 @@ class RvolutionClient:
             
             for url in status_urls:
                 try:
-                    response = await self._http_request(url)
+                    response = await self._http_request(url, method="GET")
                     if response and response.strip().startswith('{'):
                         status_data = json.loads(response)
                         _LOG.debug(f"Device status retrieved from {url}")
