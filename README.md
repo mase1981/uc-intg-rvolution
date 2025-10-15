@@ -79,6 +79,7 @@ Real R_volution IR protocol implementation with device-specific command sets:
 - **Current Media**: Title, position, duration display from device API
 - **Playback State**: Playing, Paused, Stopped status
 - **Audio Settings**: Volume level, mute status
+- **Media Info**: Full support for currently playing media info, name, title, image, etc
 - **Advanced Features**: Subtitle status, audio track, repeat mode (when available)
 
 #### **Status Synchronization**
