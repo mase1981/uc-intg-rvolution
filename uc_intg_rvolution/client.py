@@ -41,9 +41,11 @@ class RvolutionClient:
         self._base_timeout = 10
         self.connection_established = False
         self._last_successful_request = 0
-        self._rvideo_available = None  # Track R_video API availability
+        self._rvideo_available = None
+        self._health_monitor_task: Optional[asyncio.Task] = None
+        self._health_check_interval = 60.0
+        self._health_monitoring_enabled = False
         
-        # Device-specific command sets
         self._amlogic_commands = {
             "Power On": "4CB34040",
             "Power Off": "4AB54040", 
@@ -192,6 +194,8 @@ class RvolutionClient:
 
     async def close(self):
         """Close HTTP session with proper cleanup."""
+        await self.stop_health_monitoring()
+        
         if self._session and not self._session.closed:
             await self._session.close()
             await asyncio.sleep(0.25)
@@ -199,7 +203,6 @@ class RvolutionClient:
     async def _http_request(self, url: str, method: str = "GET", retry_count: int = 0) -> Optional[str]:
         await self._ensure_session()
         
-        # Rate limiting for device stability
         time_since_last = time.time() - self._last_request_time
         if time_since_last < self._min_request_interval:
             await asyncio.sleep(self._min_request_interval - time_since_last)
@@ -207,7 +210,6 @@ class RvolutionClient:
         self._last_request_time = time.time()
         
         try:
-            # Use appropriate HTTP method
             if method.upper() == "POST":
                 request = self._session.post(url, ssl=False)
             else:
@@ -226,7 +228,19 @@ class RvolutionClient:
                         await asyncio.sleep(2.0)
                         return await self._http_request(url, method, retry_count + 1)
                     return None
-                    
+        
+        except aiohttp.ClientOSError as e:
+            _LOG.warning(f"OS error (network initializing) for {self._device_config.ip_address}: {e}")
+            self.connection_established = False
+            
+            if retry_count < self._max_retries:
+                await asyncio.sleep(0.5)
+                _LOG.info(f"Retrying after OS error (attempt {retry_count + 1}/{self._max_retries + 1})...")
+                return await self._http_request(url, method, retry_count + 1)
+            else:
+                _LOG.error(f"OS error persists after {self._max_retries + 1} attempts")
+                raise ConnectionError(f"OS error after {self._max_retries + 1} attempts: {e}")
+        
         except aiohttp.ClientConnectorError as e:
             _LOG.error(f"Connection failed to {self._device_config.ip_address}: {e}")
             self.connection_established = False
@@ -238,8 +252,14 @@ class RvolutionClient:
                 await self._ensure_session()
                 return await self._http_request(url, method, retry_count + 1)
             else:
+                _LOG.error(f"Cannot connect to {self._device_config.name} at {self._device_config.ip_address}:80")
+                _LOG.error(f"Troubleshooting steps:")
+                _LOG.error(f"  1. Ping device: ping {self._device_config.ip_address}")
+                _LOG.error(f"  2. Check web interface: http://{self._device_config.ip_address}/")
+                _LOG.error(f"  3. Verify device is powered on")
+                _LOG.error(f"  4. Check IP address hasn't changed")
                 raise ConnectionError(f"Failed to connect after {self._max_retries + 1} attempts")
-                
+        
         except asyncio.TimeoutError:
             _LOG.warning(f"Request timeout to {self._device_config.ip_address}")
             self.connection_established = False
@@ -249,7 +269,7 @@ class RvolutionClient:
                 return await self._http_request(url, method, retry_count + 1)
             else:
                 raise ConnectionError(f"Request timeout after {self._max_retries + 1} attempts")
-                
+        
         except Exception as e:
             _LOG.error(f"Unexpected error requesting {url}: {e}")
             self.connection_established = False
@@ -269,7 +289,6 @@ class RvolutionClient:
         try:
             _LOG.info(f"Testing connection to {self._device_config.name}")
             
-            # Use Info command for testing - non-disruptive and reliable
             if self._device_config.device_type == DeviceType.AMLOGIC:
                 test_ir_code = self._amlogic_commands["Info"]
             else:
@@ -279,7 +298,6 @@ class RvolutionClient:
             response = await self._http_request(url, method="GET")
             
             if response is not None:
-                # Check for valid R_volution response indicators
                 success_indicators = [
                     'command_status" value="ok"',
                     'command_status" value="failed"',
@@ -293,6 +311,10 @@ class RvolutionClient:
                 if has_valid_response:
                     _LOG.info(f"Connection test passed for {self._device_config.name}")
                     self.connection_established = True
+                    
+                    if not self._health_monitoring_enabled:
+                        await self.start_health_monitoring()
+                    
                     return True
                 else:
                     _LOG.warning(f"Connection test inconclusive for {self._device_config.name}")
@@ -310,7 +332,76 @@ class RvolutionClient:
             self.connection_established = False
             return False
 
+    async def start_health_monitoring(self):
+        """Start background health monitoring task."""
+        if self._health_monitor_task is None or self._health_monitor_task.done():
+            self._health_monitoring_enabled = True
+            self._health_monitor_task = asyncio.create_task(self._connection_health_monitor())
+            _LOG.info(f"Started connection health monitoring for {self._device_config.name}")
+
+    async def stop_health_monitoring(self):
+        """Stop background health monitoring task."""
+        self._health_monitoring_enabled = False
+        if self._health_monitor_task and not self._health_monitor_task.done():
+            self._health_monitor_task.cancel()
+            try:
+                await self._health_monitor_task
+            except asyncio.CancelledError:
+                pass
+            _LOG.info(f"Stopped connection health monitoring for {self._device_config.name}")
+
+    async def _connection_health_monitor(self):
+        _LOG.debug(f"Connection health monitor started for {self._device_config.name}")
+        
+        while self._health_monitoring_enabled:
+            try:
+                await asyncio.sleep(self._health_check_interval)
+                
+                if not self.connection_established:
+                    _LOG.warning(f"Connection lost to {self._device_config.name}, attempting recovery...")
+                    
+                    recovery_success = await self._attempt_connection_recovery()
+                    
+                    if recovery_success:
+                        _LOG.info(f"Connection recovered to {self._device_config.name}!")
+                    else:
+                        _LOG.error(f"Connection recovery failed for {self._device_config.name}")
+                else:
+                    time_since_success = time.time() - self._last_successful_request
+                    if time_since_success > 300:
+                        _LOG.debug(f"Connection idle for {int(time_since_success)}s to {self._device_config.name}")
+                
+            except asyncio.CancelledError:
+                _LOG.debug(f"Connection health monitor cancelled for {self._device_config.name}")
+                break
+            except Exception as e:
+                _LOG.error(f"Health monitor error for {self._device_config.name}: {e}")
+
+    async def _attempt_connection_recovery(self, max_attempts: int = 5) -> bool:
+        delays = [5, 10, 30, 60, 300]
+        
+        for attempt in range(max_attempts):
+            try:
+                _LOG.info(f"Recovery attempt {attempt + 1}/{max_attempts} for {self._device_config.name}...")
+                
+                if await self.test_connection():
+                    return True
+                
+                if attempt < max_attempts - 1:
+                    delay = delays[min(attempt, len(delays) - 1)]
+                    _LOG.info(f"Recovery attempt {attempt + 1} failed, retrying in {delay}s...")
+                    await asyncio.sleep(delay)
+                
+            except Exception as e:
+                _LOG.error(f"Recovery attempt {attempt + 1} error: {e}")
+                if attempt < max_attempts - 1:
+                    delay = delays[min(attempt, len(delays) - 1)]
+                    await asyncio.sleep(delay)
+        
+        return False
+
     async def get_playback_information(self) -> Optional[Dict[str, Any]]:
+        """Get playback information from R_video API."""
         try:
             url = self._build_rvideo_url("/PlaybackInformation")
             _LOG.debug(f"Requesting playback info via POST: {url}")
@@ -319,7 +410,6 @@ class RvolutionClient:
             if not response:
                 return None
             
-            # Parse JSON wrapper
             json_data = json.loads(response)
             xml_content = json_data.get('XmlContent', '')
             
@@ -327,10 +417,8 @@ class RvolutionClient:
                 _LOG.debug("No XML content in PlaybackInformation response")
                 return None
             
-            # Parse XML (JSON automatically unescapes \u003C to <)
             root = ET.fromstring(xml_content)
             
-            # Extract all params into dictionary
             playback_info = {}
             for param in root.findall('.//param'):
                 name = param.get('name')
@@ -354,6 +442,7 @@ class RvolutionClient:
             return None
 
     async def get_last_media(self) -> Optional[Dict[str, Any]]:
+        """Get last media information from R_video API."""
         try:
             url = self._build_rvideo_url("/LastMedia")
             _LOG.debug(f"Requesting last media via POST: {url}")
@@ -362,15 +451,12 @@ class RvolutionClient:
             if not response:
                 return None
             
-            # Parse JSON
             media_data = json.loads(response)
             
-            # Check for error
             if media_data.get('ErrorCode') != 'None':
                 _LOG.debug(f"LastMedia returned error: {media_data.get('ErrorCode')}")
                 return None
             
-            # Extract media info
             media = media_data.get('Media')
             if not media:
                 _LOG.debug("No media data in LastMedia response")
@@ -390,6 +476,7 @@ class RvolutionClient:
             return None
 
     async def get_enhanced_status(self) -> Optional[Dict[str, Any]]:
+        """Get enhanced status combining playback info and media metadata."""
         if self._rvideo_available is None:
             _LOG.info(f"Testing R_video API availability for {self._device_config.name}...")
             playback_test = await self.get_playback_information()
@@ -405,17 +492,14 @@ class RvolutionClient:
             return None
         
         try:
-            # Get both playback info and media metadata
             playback_info = await self.get_playback_information()
             
             if not playback_info:
                 return None
             
-            # Check if currently playing media
             player_state = playback_info.get('player_state', '')
             is_playing = player_state == 'file_playback'
             
-            # Only get media metadata if actually playing
             media = None
             if is_playing:
                 media = await self.get_last_media()
@@ -453,7 +537,6 @@ class RvolutionClient:
             response = await self._http_request(url, method="GET")
             
             if response is not None:
-                # Check for success indicators in response
                 success_indicators = [
                     'command_status" value="ok"',
                     '<r>ok</r>',
@@ -467,7 +550,7 @@ class RvolutionClient:
                     return True
                 else:
                     _LOG.debug(f"IR command '{command}' executed (device responded)")
-                    return True  # Device responded, assume success
+                    return True
             else:
                 _LOG.error(f"No response for IR command '{command}'")
                 return False
@@ -520,13 +603,12 @@ class RvolutionClient:
         return await self.send_ir_command("Mute")
 
     async def get_device_status(self) -> Optional[Dict[str, Any]]:
+        """Get device status from available endpoints."""
         try:
-            # Try enhanced status first (R_video API)
             enhanced = await self.get_enhanced_status()
             if enhanced:
                 return enhanced
             
-            # Fallback to basic status endpoints
             status_urls = [
                 self._build_ir_url("/device/status"),
                 self._build_ir_url("/device/info"),
