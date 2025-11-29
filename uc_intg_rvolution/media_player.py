@@ -27,9 +27,9 @@ class RvolutionMediaPlayer(MediaPlayer):
         self._api = api
         self._attr_available = True
         self._initialization_complete = False
-        self._status_available = None  # Track if status endpoint works (None = unknown, True/False = known)
+        self._status_available = None
         self._polling_task: Optional[asyncio.Task] = None
-        self._polling_interval = 5.0  # Poll every 5 seconds
+        self._polling_interval = 5.0
         
         entity_id = f"mp_{device_config.device_id}"
         
@@ -86,25 +86,21 @@ class RvolutionMediaPlayer(MediaPlayer):
         _LOG.info(f"Created media player entity: {entity_id} for {device_config.name}")
 
     def _start_polling(self):
-        """Start background polling task for status updates."""
         if self._polling_task is None or self._polling_task.done():
             self._polling_task = asyncio.create_task(self._status_polling_loop())
             _LOG.info(f"Started status polling for media player {self.id}")
 
     def _stop_polling(self):
-        """Stop background polling task."""
         if self._polling_task and not self._polling_task.done():
             self._polling_task.cancel()
             _LOG.info(f"Stopped status polling for media player {self.id}")
 
     async def _status_polling_loop(self):
-        """Background task for continuous status updates."""
         _LOG.debug(f"Status polling loop started for {self.id}")
         while True:
             try:
                 await asyncio.sleep(self._polling_interval)
                 
-                # Only poll if status is available or unknown
                 if self._status_available is not False:
                     await self._safe_update_status()
                     
@@ -113,7 +109,6 @@ class RvolutionMediaPlayer(MediaPlayer):
                 break
             except Exception as e:
                 _LOG.debug(f"Polling error for {self.id}: {e}")
-                # Continue polling even on errors
 
     async def _cmd_handler(self, entity: ucapi.Entity, cmd_id: str, params: dict[str, Any] | None) -> StatusCodes:
         _LOG.debug(f"Media player {self.id} received command: {cmd_id}")
@@ -142,7 +137,6 @@ class RvolutionMediaPlayer(MediaPlayer):
             elif cmd_id == Commands.PLAY_PAUSE:
                 success = await self._client.play_pause()
                 if success:
-                    # Trigger immediate status update
                     if self._status_available is not False:
                         await self._safe_update_status()
                 return StatusCodes.OK if success else StatusCodes.SERVER_ERROR
@@ -171,7 +165,6 @@ class RvolutionMediaPlayer(MediaPlayer):
             elif cmd_id == Commands.VOLUME_UP:
                 success = await self._client.volume_up()
                 if success:
-                    # Optimistically update volume (R_volution increments by 5)
                     current_volume = self.attributes.get(Attributes.VOLUME, 50)
                     new_volume = min(100, current_volume + 5)
                     await self._update_attributes({Attributes.VOLUME: new_volume})
@@ -181,7 +174,6 @@ class RvolutionMediaPlayer(MediaPlayer):
             elif cmd_id == Commands.VOLUME_DOWN:
                 success = await self._client.volume_down()
                 if success:
-                    # Optimistically update volume (R_volution decrements by 5)
                     current_volume = self.attributes.get(Attributes.VOLUME, 50)
                     new_volume = max(0, current_volume - 5)
                     await self._update_attributes({Attributes.VOLUME: new_volume})
@@ -191,7 +183,6 @@ class RvolutionMediaPlayer(MediaPlayer):
             elif cmd_id == Commands.MUTE_TOGGLE or cmd_id == Commands.MUTE:
                 success = await self._client.mute()
                 if success:
-                    # Toggle mute state
                     current_mute = self.attributes.get(Attributes.MUTED, False)
                     new_mute = not current_mute
                     await self._update_attributes({Attributes.MUTED: new_mute})
@@ -231,29 +222,24 @@ class RvolutionMediaPlayer(MediaPlayer):
         Safely update status with R_video API integration.
         Provides rich media metadata when available, never affects entity availability.
         """
-        # If we already know status doesn't work, skip completely
         if self._status_available is False:
             return
         
         try:
-            # Get enhanced status from R_video API
             enhanced_status = await self._client.get_enhanced_status()
             
-            # No status data - mark as unavailable and stop trying
             if not enhanced_status:
                 if self._status_available is None:
                     _LOG.info(f"Device {self.id} does not provide R_video API - basic mode enabled")
                     self._status_available = False
                 return
             
-            # Status works! Mark as available and process data
             if self._status_available is None:
                 _LOG.info(f"Device {self.id} R_video API available - enhanced media display enabled")
                 self._status_available = True
             
             attributes_update = {}
             
-            # Extract playback information
             playback_info = enhanced_status.get('playback_info', {})
             is_playing = enhanced_status.get('is_playing', False)
             
@@ -281,10 +267,8 @@ class RvolutionMediaPlayer(MediaPlayer):
             elif playback_state == 'buffering':
                 attributes_update[Attributes.STATE] = States.BUFFERING
             elif is_playing:
-                # In file_playback mode but no explicit state
                 attributes_update[Attributes.STATE] = States.PLAYING
             else:
-                # Not playing, in navigator/menu
                 attributes_update[Attributes.STATE] = States.ON
                 # Clear media info when not playing
                 attributes_update[Attributes.MEDIA_TITLE] = ""
@@ -360,6 +344,15 @@ class RvolutionMediaPlayer(MediaPlayer):
                             attributes_update[Attributes.MEDIA_TYPE] = "VIDEO"
                         
                         _LOG.debug(f"Updated media: {title} (type: {media_type})")
+                
+                else:
+                    # ✅ FIX: Playing but no metadata (trailer) - explicitly clear all media attributes
+                    _LOG.info(f"Playing content without metadata - clearing media attributes")
+                    attributes_update[Attributes.MEDIA_TITLE] = ""
+                    attributes_update[Attributes.MEDIA_ARTIST] = ""
+                    attributes_update[Attributes.MEDIA_ALBUM] = ""
+                    attributes_update[Attributes.MEDIA_IMAGE_URL] = ""
+                    attributes_update[Attributes.MEDIA_TYPE] = ""
             
             # Apply updates if we have any
             if attributes_update:
@@ -367,11 +360,9 @@ class RvolutionMediaPlayer(MediaPlayer):
                 _LOG.debug(f"Updated {len(attributes_update)} attributes for {self.id}")
                 
         except Exception as e:
-            # Mark status as unavailable on first failure
             if self._status_available is None:
                 _LOG.info(f"Device {self.id} status check failed - disabling status polling: {e}")
                 self._status_available = False
-            # Silently ignore all status update failures - they never affect availability
 
     async def _update_attributes(self, attributes: dict[str, Any]) -> None:
         """Update entity attributes."""
@@ -417,7 +408,6 @@ class RvolutionMediaPlayer(MediaPlayer):
         _LOG.debug(f"Updating state for media player {self.id}")
         
         try:
-            # Connection test uses IR command, not status endpoint
             connection_success = await self.test_connection()
             
             if connection_success:
@@ -425,11 +415,9 @@ class RvolutionMediaPlayer(MediaPlayer):
                     await self._update_attributes({Attributes.STATE: States.ON})
                     self._attr_available = True
                     
-                    # Try initial status update ONLY if not yet determined
                     if self._status_available is None:
                         await self._safe_update_status()
                     
-                    # Start polling for continuous updates
                     self._start_polling()
                 else:
                     await self._update_attributes({Attributes.STATE: States.UNKNOWN})
