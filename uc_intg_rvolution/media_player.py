@@ -30,6 +30,8 @@ class RvolutionMediaPlayer(MediaPlayer):
         self._status_available = None
         self._polling_task: Optional[asyncio.Task] = None
         self._polling_interval = 5.0
+        self._consecutive_failures = 0
+        self._max_consecutive_failures = 3
         
         entity_id = f"mp_{device_config.device_id}"
         
@@ -229,10 +231,19 @@ class RvolutionMediaPlayer(MediaPlayer):
             enhanced_status = await self._client.get_enhanced_status()
             
             if not enhanced_status:
-                if self._status_available is None:
-                    _LOG.info(f"Device {self.id} does not provide R_video API - basic mode enabled")
-                    self._status_available = False
+                self._consecutive_failures += 1
+                _LOG.debug(f"Status update failed for {self.id} (attempt {self._consecutive_failures}/{self._max_consecutive_failures})")
+                
+                if self._consecutive_failures >= self._max_consecutive_failures:
+                    if self._status_available is None:
+                        _LOG.info(f"Device {self.id} does not provide R_video API - basic mode enabled")
+                        self._status_available = False
+                    elif self._status_available is True:
+                        _LOG.warning(f"Device {self.id} R_video API temporarily unavailable (disc menu mode?)")
+                
                 return
+            
+            self._consecutive_failures = 0
             
             if self._status_available is None:
                 _LOG.info(f"Device {self.id} R_video API available - enhanced media display enabled")
@@ -243,7 +254,6 @@ class RvolutionMediaPlayer(MediaPlayer):
             playback_info = enhanced_status.get('playback_info', {})
             is_playing = enhanced_status.get('is_playing', False)
             
-            # Update volume and mute from playback info
             if 'playback_volume' in playback_info:
                 try:
                     volume = int(playback_info['playback_volume'])
@@ -258,7 +268,6 @@ class RvolutionMediaPlayer(MediaPlayer):
                 except (ValueError, TypeError):
                     pass
             
-            # Update playback state
             playback_state = playback_info.get('playback_state', '')
             if playback_state == 'playing':
                 attributes_update[Attributes.STATE] = States.PLAYING
@@ -270,7 +279,6 @@ class RvolutionMediaPlayer(MediaPlayer):
                 attributes_update[Attributes.STATE] = States.PLAYING
             else:
                 attributes_update[Attributes.STATE] = States.ON
-                # Clear media info when not playing
                 attributes_update[Attributes.MEDIA_TITLE] = ""
                 attributes_update[Attributes.MEDIA_ARTIST] = ""
                 attributes_update[Attributes.MEDIA_ALBUM] = ""
@@ -279,11 +287,9 @@ class RvolutionMediaPlayer(MediaPlayer):
                 attributes_update[Attributes.MEDIA_DURATION] = 0
                 attributes_update[Attributes.MEDIA_POSITION] = 0
             
-            # If playing, extract rich media metadata
             if is_playing:
                 media = enhanced_status.get('media')
                 
-                # Update duration and position
                 if 'playback_duration' in playback_info:
                     try:
                         duration = int(playback_info['playback_duration'])
@@ -298,12 +304,10 @@ class RvolutionMediaPlayer(MediaPlayer):
                     except (ValueError, TypeError):
                         pass
                 
-                # Process media metadata if available
                 if media:
                     media_type = media.get('Type', '')
                     
                     if media_type == 'Movie':
-                        # Movie: Show title and poster
                         title = media.get('Title', '')
                         poster_url = media.get('PosterUrl', '')
                         
@@ -311,21 +315,18 @@ class RvolutionMediaPlayer(MediaPlayer):
                         attributes_update[Attributes.MEDIA_TYPE] = "MOVIE"
                         attributes_update[Attributes.MEDIA_IMAGE_URL] = poster_url
                         
-                        # Clear TV show fields
                         attributes_update[Attributes.MEDIA_ARTIST] = ""
                         attributes_update[Attributes.MEDIA_ALBUM] = ""
                         
                         _LOG.info(f"Updated movie: {title}")
                     
                     elif media_type == 'TVShowEpisode':
-                        # TV Show: Show episode title, series name, season/episode, poster
                         episode_title = media.get('Title', '')
                         series_name = media.get('TvShowName', '')
                         season = media.get('Season', 0)
                         episode = media.get('Episode', 0)
                         poster_url = media.get('PosterUrl', '')
                         
-                        # Format season/episode info
                         season_episode = f"Season {season} Episode {episode}" if season and episode else ""
                         
                         attributes_update[Attributes.MEDIA_TITLE] = episode_title
@@ -337,7 +338,6 @@ class RvolutionMediaPlayer(MediaPlayer):
                         _LOG.info(f"Updated TV show: {series_name} - {episode_title} ({season_episode})")
                     
                     else:
-                        # Unknown media type - show basic info
                         title = media.get('Title', '')
                         if title:
                             attributes_update[Attributes.MEDIA_TITLE] = title
@@ -346,7 +346,6 @@ class RvolutionMediaPlayer(MediaPlayer):
                         _LOG.debug(f"Updated media: {title} (type: {media_type})")
                 
                 else:
-                    # ✅ FIX: Playing but no metadata (trailer) - explicitly clear all media attributes
                     _LOG.info(f"Playing content without metadata - clearing media attributes")
                     attributes_update[Attributes.MEDIA_TITLE] = ""
                     attributes_update[Attributes.MEDIA_ARTIST] = ""
@@ -354,18 +353,20 @@ class RvolutionMediaPlayer(MediaPlayer):
                     attributes_update[Attributes.MEDIA_IMAGE_URL] = ""
                     attributes_update[Attributes.MEDIA_TYPE] = ""
             
-            # Apply updates if we have any
             if attributes_update:
                 await self._update_attributes(attributes_update)
                 _LOG.debug(f"Updated {len(attributes_update)} attributes for {self.id}")
                 
         except Exception as e:
-            if self._status_available is None:
-                _LOG.info(f"Device {self.id} status check failed - disabling status polling: {e}")
-                self._status_available = False
+            self._consecutive_failures += 1
+            _LOG.debug(f"Status check error for {self.id}: {e} (attempt {self._consecutive_failures}/{self._max_consecutive_failures})")
+            
+            if self._consecutive_failures >= self._max_consecutive_failures:
+                if self._status_available is None:
+                    _LOG.info(f"Device {self.id} status check failed - disabling status polling: {e}")
+                    self._status_available = False
 
     async def _update_attributes(self, attributes: dict[str, Any]) -> None:
-        """Update entity attributes."""
         try:
             for key, value in attributes.items():
                 self.attributes[key] = value
@@ -382,7 +383,6 @@ class RvolutionMediaPlayer(MediaPlayer):
             _LOG.error(f"Failed to update attributes for media player {self.id}: {e}")
 
     async def test_connection(self) -> bool:
-        """Test device connectivity - uses IR command test, never status endpoint."""
         try:
             success = await self._client.test_connection()
             
@@ -404,7 +404,6 @@ class RvolutionMediaPlayer(MediaPlayer):
             return False
 
     async def push_update(self) -> None:
-        """Update entity state and start polling."""
         _LOG.debug(f"Updating state for media player {self.id}")
         
         try:
@@ -435,10 +434,8 @@ class RvolutionMediaPlayer(MediaPlayer):
 
     @property
     def available(self) -> bool:
-        """Return entity availability - based only on IR command connectivity."""
         return self._attr_available and self._initialization_complete
 
     @property
     def device_config(self) -> DeviceConfig:
-        """Get device configuration."""
         return self._device_config
