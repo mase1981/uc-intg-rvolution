@@ -113,7 +113,7 @@ class RvolutionRemote(ucapi.Remote):
         for col_idx, (label, cmd) in enumerate(colors):
             numbers_page.add(create_ui_text(label, col_idx, 3, cmd=cmd))
         
-        numbers_page.add(create_ui_text("Page↑", 0, 4, cmd="Page Up"))
+        numbers_page.add(create_ui_text("Page→", 0, 4, cmd="Page Up"))
         numbers_page.add(create_ui_text("Page↓", 1, 4, cmd="Page Down"))
         numbers_page.add(create_ui_text("Delete", 2, 4, cmd="Delete"))
         numbers_page.add(create_ui_text("3D", 3, 4, cmd="3D"))
@@ -207,13 +207,32 @@ class RvolutionRemote(ucapi.Remote):
 
     async def _update_attributes(self, attributes: dict[str, Any]) -> None:
         try:
+            # Update local attributes first
             for key, value in attributes.items():
                 self.attributes[key] = value
             
-            if self._api and self._api.configured_entities:
-                self._api.configured_entities.update_attributes(self.id, attributes)
+            # For ucapi 0.5.x: Use entity_change event instead of update_attributes
+            if self._api and hasattr(self._api, 'configured_entities') and self._api.configured_entities:
+                try:
+                    # Try new ucapi 0.5.x method: entity_change
+                    if hasattr(self._api.configured_entities, 'entity_change'):
+                        self._api.configured_entities.entity_change(self.id, attributes)
+                        _LOG.debug(f"Updated attributes via entity_change for {self.id}")
+                    else:
+                        # Fallback: direct entity object update
+                        entity = self._api.configured_entities.get(self.id)
+                        if entity:
+                            for key, value in attributes.items():
+                                if hasattr(entity, 'attributes'):
+                                    entity.attributes[key] = value
+                            _LOG.debug(f"Updated attributes via direct entity for {self.id}")
+                        else:
+                            _LOG.warning(f"Entity {self.id} not found in configured_entities")
+                except Exception as update_error:
+                    _LOG.debug(f"Could not update via API (continuing with local update): {update_error}")
             
             _LOG.debug(f"Updated attributes for remote {self.id}: {attributes}")
+            
         except Exception as e:
             _LOG.error(f"Failed to update attributes for remote {self.id}: {e}")
 

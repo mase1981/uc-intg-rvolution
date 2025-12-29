@@ -50,6 +50,7 @@ async def _initialize_integration():
 
         connected_devices = 0
 
+        # Clear all entity collections for fresh initialization
         api.available_entities.clear()
         clients.clear()
         media_players.clear()
@@ -77,28 +78,41 @@ async def _initialize_integration():
                 media_player_id = f"mp_{device_config.device_id}"
                 remote_id = f"remote_{device_config.device_id}"
 
+                # Create entity objects
                 media_player_entity = RvolutionMediaPlayer(client, device_config, api)
                 remote_entity = RvolutionRemote(client, device_config, api)
 
+                # Add to available_entities for UC Remote discovery
                 api.available_entities.add(media_player_entity)
                 api.available_entities.add(remote_entity)
 
+                # Store in global dictionaries for access
                 clients[device_config.device_id] = client
                 media_players[device_config.device_id] = media_player_entity
                 remotes[device_config.device_id] = remote_entity
 
                 connected_devices += 1
-                _LOG.info("Successfully setup device: %s", device_config.name)
+                _LOG.info("Successfully setup device: %s (Media Player: %s, Remote: %s)", 
+                         device_config.name, media_player_id, remote_id)
 
             except Exception as e:
                 _LOG.error("Failed to setup device %s: %s", device_config.name, e, exc_info=True)
                 continue
 
         if connected_devices > 0:
+            # CRITICAL: Mark entities as ready BEFORE setting connected state
+            # This prevents race condition where UC Remote tries to subscribe before entities exist
             entities_ready = True
+            
+            # Set device state to CONNECTED
             await api.set_device_state(DeviceStates.CONNECTED)
+            
             _LOG.info("R_volution integration initialization completed successfully - %d/%d devices connected.", 
                      connected_devices, len(config.get_all_devices()))
+            
+            # Log entity registration status for debugging
+            _LOG.debug("Available entities: %d", len(api.available_entities._entities) if hasattr(api.available_entities, '_entities') else 0)
+            
             return True
         else:
             entities_ready = False
@@ -116,8 +130,10 @@ async def setup_handler(msg: ucapi.SetupDriver) -> ucapi.SetupAction:
         host = msg.setup_data.get("host", "").strip()
         
         if device_count == 1 and host:
+            # Single device quick setup
             return await _handle_single_device_setup(msg.setup_data)
         else:
+            # Multi-device setup flow
             return await _request_device_configurations(device_count)
     
     elif isinstance(msg, UserDataResponse):
@@ -127,6 +143,7 @@ async def setup_handler(msg: ucapi.SetupDriver) -> ucapi.SetupAction:
 
 
 async def _handle_single_device_setup(setup_data: Dict[str, Any]) -> ucapi.SetupAction:
+    """Handle single device setup from driver.json initial configuration."""
     host_input = setup_data.get("host")
     if not host_input:
         _LOG.error("No host provided in setup data")
@@ -160,7 +177,11 @@ async def _handle_single_device_setup(setup_data: Dict[str, Any]) -> ucapi.Setup
             return SetupError(IntegrationSetupError.CONNECTION_REFUSED)
 
         config.add_device(device_config)
+        _LOG.info("Device configuration saved, initializing integration...")
+        
+        # Initialize integration with new device
         await _initialize_integration()
+        
         return SetupComplete()
 
     except Exception as e:
@@ -169,6 +190,7 @@ async def _handle_single_device_setup(setup_data: Dict[str, Any]) -> ucapi.Setup
 
 
 async def _request_device_configurations(device_count: int) -> RequestUserInput:
+    """Request configuration for multiple devices."""
     settings = []
 
     for i in range(device_count):
@@ -207,6 +229,7 @@ async def _request_device_configurations(device_count: int) -> RequestUserInput:
 
 
 async def _handle_device_configurations(input_values: Dict[str, Any]) -> ucapi.SetupAction:
+    """Process device configurations from multi-device setup."""
     devices_to_test = []
 
     device_index = 0
@@ -265,14 +288,15 @@ async def _handle_device_configurations(input_values: Dict[str, Any]) -> ucapi.S
         _LOG.error("No devices could be connected")
         return SetupError(IntegrationSetupError.CONNECTION_REFUSED)
 
+    _LOG.info(f"Device configurations saved, initializing integration...")
     await _initialize_integration()
+    
     _LOG.info(f"Multi-device setup completed: {successful_devices}/{len(devices_to_test)} devices configured")
     return SetupComplete()
 
 
 async def _test_multiple_devices_safely(devices: List[Dict]) -> List[bool]:
-    """Test multiple devices with improved stability and sequential processing to avoid overwhelming devices."""
-    
+
     async def test_single_device_safely(device_data):
         """Test single device with proper error handling and connection management."""
         try:
@@ -303,14 +327,13 @@ async def _test_multiple_devices_safely(devices: List[Dict]) -> List[bool]:
 
     results = []
     
+    # Test devices sequentially to avoid overwhelming HTTP servers
     for i, device in enumerate(devices):
         _LOG.info(f"Testing device {i + 1}/{len(devices)}: {device['name']}")
         
         result = await test_single_device_safely(device)
         results.append(result)
-        
-        # Add delay between device tests to prevent HTTP server overload
-        # This is critical for R_volution devices with unstable HTTP implementations
+
         if i < len(devices) - 1:  # Don't delay after last device
             delay = 3.0  # 3 second delay between device tests
             _LOG.debug(f"Waiting {delay}s before testing next device (HTTP server stability)")
@@ -320,34 +343,51 @@ async def _test_multiple_devices_safely(devices: List[Dict]) -> List[bool]:
 
 
 async def on_subscribe_entities(entity_ids: List[str]):
+    """
+    Handle entity subscription with race condition protection.
+    CRITICAL: Must verify entities are ready before processing subscriptions.
+    """
     _LOG.info("Entities subscribed: %s", entity_ids)
     
+    # Race condition protection: ensure entities are initialized
     if not entities_ready:
-        _LOG.error("RACE CONDITION: Subscription before entities ready!")
+        _LOG.error("RACE CONDITION DETECTED: Subscription before entities ready!")
+        _LOG.info("Attempting emergency initialization...")
         success = await _initialize_integration()
         if not success:
             _LOG.error("Failed to initialize during subscription attempt")
             return
-    
+
     for entity_id in entity_ids:
-        for media_player in media_players.values():
-            if media_player.id == entity_id:
-                await media_player.push_update()
-                break
-        
-        for remote in remotes.values():
-            if remote.id == entity_id:
-                await remote.push_update()
-                break
+        try:
+            # Check media players
+            for media_player in media_players.values():
+                if media_player.id == entity_id:
+                    _LOG.debug(f"Pushing update for media player: {entity_id}")
+                    await media_player.push_update()
+                    break
+            
+            # Check remotes
+            for remote in remotes.values():
+                if remote.id == entity_id:
+                    _LOG.debug(f"Pushing update for remote: {entity_id}")
+                    await remote.push_update()
+                    break
+                    
+        except Exception as e:
+            _LOG.error(f"Error pushing update for entity {entity_id}: {e}", exc_info=True)
 
 
 async def on_connect():
+
     global entities_ready
     
     _LOG.info("Remote Two connected")
     
+    # CRITICAL: Reload configuration from disk for reboot survival
     if config:
         config.reload_from_disk()
+        _LOG.debug("Configuration reloaded from disk")
     
     if config and config.is_configured():
         if not entities_ready:
@@ -364,18 +404,22 @@ async def on_connect():
 
 
 async def on_disconnect():
+    """Handle UC Remote disconnection."""
     _LOG.info("Remote Two disconnected")
 
 
 async def on_unsubscribe_entities(entity_ids: List[str]):
+    """Handle entity unsubscription."""
     _LOG.info("Entities unsubscribed: %s", entity_ids)
 
 
 async def health_check(request):
+    """Health check endpoint for monitoring."""
     return web.Response(text="OK", status=200)
 
 
 async def start_health_server():
+    """Start health check HTTP server on port 9090."""
     try:
         app = web.Application()
         app.router.add_get('/health', health_check)
@@ -389,6 +433,7 @@ async def start_health_server():
 
 
 async def main():
+
     global api, config
     
     logging.basicConfig(
@@ -400,34 +445,44 @@ async def main():
     try:
         loop = asyncio.get_running_loop()
         
+        # Initialize configuration
         config_dir = os.getenv("UC_CONFIG_HOME", "./")
         config_file_path = os.path.join(config_dir, "config.json")
         config = RvolutionConfig(config_file_path)
 
+        # Load driver metadata
         driver_path = os.path.join(os.path.dirname(__file__), "..", "driver.json")
         api = ucapi.IntegrationAPI(loop)
 
         if config.is_configured():
             _LOG.info("Pre-configuring entities before UC Remote connection")
             _LOG.info(f"Configuration summary: {config.get_summary()}")
-            # CRITICAL FIX: Use await instead of create_task to block until entities are ready
-            # This prevents race condition where UC Remote tries to subscribe before entities exist
-            await _initialize_integration()
 
+            await _initialize_integration()
+        else:
+            _LOG.info("No existing configuration found, waiting for setup")
+
+        # Initialize integration API
         await api.init(os.path.abspath(driver_path), setup_handler)
 
+        # Start health check server
         asyncio.create_task(start_health_server())
 
+        # Register event handlers
         api.add_listener(Events.SUBSCRIBE_ENTITIES, on_subscribe_entities)
         api.add_listener(Events.UNSUBSCRIBE_ENTITIES, on_unsubscribe_entities)
         api.add_listener(Events.CONNECT, on_connect)
         api.add_listener(Events.DISCONNECT, on_disconnect)
 
+        # Set initial device state
         if not config.is_configured():
             _LOG.info("Device not configured, waiting for setup...")
             await api.set_device_state(DeviceStates.DISCONNECTED)
 
         _LOG.info("R_volution integration driver started successfully")
+        _LOG.info(f"Entities ready: {entities_ready}, Configured devices: {config.get_device_count()}")
+        
+        # Run forever
         await asyncio.Future()
         
     except Exception as e:
@@ -435,6 +490,7 @@ async def main():
     finally:
         _LOG.info("Shutting down R_volution integration")
         
+        # Clean up all client connections
         for client in clients.values():
             try:
                 await client.close()

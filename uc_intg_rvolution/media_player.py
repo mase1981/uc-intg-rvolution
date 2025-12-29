@@ -6,7 +6,9 @@ R_volution Media Player entity
 """
 
 import asyncio
+import hashlib
 import logging
+import time
 from typing import Any, Optional
 
 import ucapi
@@ -32,6 +34,7 @@ class RvolutionMediaPlayer(MediaPlayer):
         self._polling_interval = 5.0
         self._consecutive_failures = 0
         self._max_consecutive_failures = 3
+        self._last_image_url = ""  # Track last image URL for dynamic refresh
         
         entity_id = f"mp_{device_config.device_id}"
         
@@ -86,6 +89,22 @@ class RvolutionMediaPlayer(MediaPlayer):
         )
         
         _LOG.info(f"Created media player entity: {entity_id} for {device_config.name}")
+
+    def _make_dynamic_image_url(self, base_url: str) -> str:
+        if not base_url:
+            return base_url
+        
+        # Check if this is the same URL as last time
+        if base_url == self._last_image_url:
+            # Add dynamic timestamp parameter to force refresh
+            separator = "&" if "?" in base_url else "?"
+            dynamic_url = f"{base_url}{separator}t={int(time.time() * 1000)}"
+            _LOG.debug(f"Image URL unchanged, adding dynamic parameter: {dynamic_url}")
+            return dynamic_url
+        
+        # URL is different, update tracking and return as-is
+        self._last_image_url = base_url
+        return base_url
 
     def _start_polling(self):
         if self._polling_task is None or self._polling_task.done():
@@ -220,10 +239,6 @@ class RvolutionMediaPlayer(MediaPlayer):
             return StatusCodes.SERVER_ERROR
 
     async def _safe_update_status(self):
-        """
-        Safely update status with R_video API integration.
-        Provides rich media metadata when available, never affects entity availability.
-        """
         if self._status_available is False:
             return
         
@@ -286,6 +301,7 @@ class RvolutionMediaPlayer(MediaPlayer):
                 attributes_update[Attributes.MEDIA_TYPE] = ""
                 attributes_update[Attributes.MEDIA_DURATION] = 0
                 attributes_update[Attributes.MEDIA_POSITION] = 0
+                self._last_image_url = ""  # Reset image tracking when not playing
             
             if is_playing:
                 media = enhanced_status.get('media')
@@ -311,6 +327,10 @@ class RvolutionMediaPlayer(MediaPlayer):
                         title = media.get('Title', '')
                         poster_url = media.get('PosterUrl', '')
                         
+                        # Apply dynamic URL enhancement for firmware compatibility
+                        if poster_url:
+                            poster_url = self._make_dynamic_image_url(poster_url)
+                        
                         attributes_update[Attributes.MEDIA_TITLE] = title
                         attributes_update[Attributes.MEDIA_TYPE] = "MOVIE"
                         attributes_update[Attributes.MEDIA_IMAGE_URL] = poster_url
@@ -326,6 +346,10 @@ class RvolutionMediaPlayer(MediaPlayer):
                         season = media.get('Season', 0)
                         episode = media.get('Episode', 0)
                         poster_url = media.get('PosterUrl', '')
+                        
+                        # Apply dynamic URL enhancement for firmware compatibility
+                        if poster_url:
+                            poster_url = self._make_dynamic_image_url(poster_url)
                         
                         season_episode = f"Season {season} Episode {episode}" if season and episode else ""
                         
@@ -352,6 +376,7 @@ class RvolutionMediaPlayer(MediaPlayer):
                     attributes_update[Attributes.MEDIA_ALBUM] = ""
                     attributes_update[Attributes.MEDIA_IMAGE_URL] = ""
                     attributes_update[Attributes.MEDIA_TYPE] = ""
+                    self._last_image_url = ""  # Reset image tracking
             
             if attributes_update:
                 await self._update_attributes(attributes_update)
@@ -368,14 +393,29 @@ class RvolutionMediaPlayer(MediaPlayer):
 
     async def _update_attributes(self, attributes: dict[str, Any]) -> None:
         try:
+            # Update local attributes first
             for key, value in attributes.items():
                 self.attributes[key] = value
             
+            # For ucapi 0.5.x: Use entity_change event instead of update_attributes
             if self._api and hasattr(self._api, 'configured_entities') and self._api.configured_entities:
                 try:
-                    self._api.configured_entities.update_attributes(self.id, attributes)
+                    # Try new ucapi 0.5.x method: entity_change
+                    if hasattr(self._api.configured_entities, 'entity_change'):
+                        self._api.configured_entities.entity_change(self.id, attributes)
+                        _LOG.debug(f"Updated attributes via entity_change for {self.id}")
+                    else:
+                        # Fallback: direct entity object update
+                        entity = self._api.configured_entities.get(self.id)
+                        if entity:
+                            for key, value in attributes.items():
+                                if hasattr(entity, 'attributes'):
+                                    entity.attributes[key] = value
+                            _LOG.debug(f"Updated attributes via direct entity for {self.id}")
+                        else:
+                            _LOG.warning(f"Entity {self.id} not found in configured_entities")
                 except Exception as update_error:
-                    _LOG.debug(f"Could not update integration API: {update_error}")
+                    _LOG.debug(f"Could not update via API (continuing with local update): {update_error}")
             
             _LOG.debug(f"Updated attributes for media player {self.id}: {list(attributes.keys())}")
             
