@@ -35,6 +35,7 @@ class RvolutionMediaPlayer(MediaPlayer):
         self._consecutive_failures = 0
         self._max_consecutive_failures = 3
         self._last_image_url = ""  # Track last image URL for dynamic refresh
+        self._last_media_title = ""  # Track last media title for firmware compatibility
         
         entity_id = f"mp_{device_config.device_id}"
         
@@ -90,20 +91,25 @@ class RvolutionMediaPlayer(MediaPlayer):
         
         _LOG.info(f"Created media player entity: {entity_id} for {device_config.name}")
 
-    def _make_dynamic_image_url(self, base_url: str) -> str:
+    def _make_dynamic_image_url(self, base_url: str, media_title: str = "") -> str:
+        """
+        Generate dynamic image URL for new UC firmware compatibility.
+        Firmware requires unique URLs for each update to refresh images.
+        """
         if not base_url:
             return base_url
         
-        # Check if this is the same URL as last time
-        if base_url == self._last_image_url:
-            # Add dynamic timestamp parameter to force refresh
+        # UC firmware now requires EVERY URL to be unique for image refresh
+        # Always add timestamp parameter when updating the same content
+        if base_url == self._last_image_url or media_title == self._last_media_title:
             separator = "&" if "?" in base_url else "?"
             dynamic_url = f"{base_url}{separator}t={int(time.time() * 1000)}"
-            _LOG.debug(f"Image URL unchanged, adding dynamic parameter: {dynamic_url}")
+            _LOG.debug(f"UC firmware compatibility: Adding dynamic timestamp to image URL")
             return dynamic_url
         
-        # URL is different, update tracking and return as-is
+        # First time seeing this URL/content - update tracking and use as-is
         self._last_image_url = base_url
+        self._last_media_title = media_title
         return base_url
 
     def _start_polling(self):
@@ -220,6 +226,13 @@ class RvolutionMediaPlayer(MediaPlayer):
             elif cmd_id == Commands.VOLUME and params and "volume" in params:
                 return StatusCodes.NOT_IMPLEMENTED
             
+            elif cmd_id == Commands.REPEAT:
+                # Handle repeat command - send Repeat IR command to device
+                success = await self._client.send_ir_command("Repeat")
+                if success:
+                    _LOG.debug("Repeat command sent to device")
+                return StatusCodes.OK if success else StatusCodes.SERVER_ERROR
+            
             else:
                 _LOG.warning(f"Unknown command for media player {self.id}: {cmd_id}")
                 return StatusCodes.NOT_IMPLEMENTED
@@ -302,6 +315,7 @@ class RvolutionMediaPlayer(MediaPlayer):
                 attributes_update[Attributes.MEDIA_DURATION] = 0
                 attributes_update[Attributes.MEDIA_POSITION] = 0
                 self._last_image_url = ""  # Reset image tracking when not playing
+                self._last_media_title = ""  # Reset title tracking
             
             if is_playing:
                 media = enhanced_status.get('media')
@@ -327,9 +341,9 @@ class RvolutionMediaPlayer(MediaPlayer):
                         title = media.get('Title', '')
                         poster_url = media.get('PosterUrl', '')
                         
-                        # Apply dynamic URL enhancement for firmware compatibility
+                        # Apply dynamic URL enhancement for UC firmware compatibility
                         if poster_url:
-                            poster_url = self._make_dynamic_image_url(poster_url)
+                            poster_url = self._make_dynamic_image_url(poster_url, title)
                         
                         attributes_update[Attributes.MEDIA_TITLE] = title
                         attributes_update[Attributes.MEDIA_TYPE] = "MOVIE"
@@ -347,9 +361,9 @@ class RvolutionMediaPlayer(MediaPlayer):
                         episode = media.get('Episode', 0)
                         poster_url = media.get('PosterUrl', '')
                         
-                        # Apply dynamic URL enhancement for firmware compatibility
+                        # Apply dynamic URL enhancement for UC firmware compatibility
                         if poster_url:
-                            poster_url = self._make_dynamic_image_url(poster_url)
+                            poster_url = self._make_dynamic_image_url(poster_url, episode_title)
                         
                         season_episode = f"Season {season} Episode {episode}" if season and episode else ""
                         
@@ -377,6 +391,7 @@ class RvolutionMediaPlayer(MediaPlayer):
                     attributes_update[Attributes.MEDIA_IMAGE_URL] = ""
                     attributes_update[Attributes.MEDIA_TYPE] = ""
                     self._last_image_url = ""  # Reset image tracking
+                    self._last_media_title = ""  # Reset title tracking
             
             if attributes_update:
                 await self._update_attributes(attributes_update)

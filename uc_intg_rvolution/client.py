@@ -36,7 +36,7 @@ class RvolutionClient:
         self._device_config = device_config
         self._session: Optional[aiohttp.ClientSession] = None
         self._last_request_time = 0
-        self._min_request_interval = 1.0
+        self._min_request_interval = 0.3
         self._max_retries = 1
         self._base_timeout = 10
         self.connection_established = False
