@@ -34,8 +34,6 @@ class RvolutionMediaPlayer(MediaPlayer):
         self._polling_interval = 5.0
         self._consecutive_failures = 0
         self._max_consecutive_failures = 3
-        self._last_image_url = ""  # Track last image URL for dynamic refresh
-        self._last_media_title = ""  # Track last media title for firmware compatibility
         
         entity_id = f"mp_{device_config.device_id}"
         
@@ -98,19 +96,13 @@ class RvolutionMediaPlayer(MediaPlayer):
         """
         if not base_url:
             return base_url
-        
-        # UC firmware now requires EVERY URL to be unique for image refresh
-        # Always add timestamp parameter when updating the same content
-        if base_url == self._last_image_url or media_title == self._last_media_title:
-            separator = "&" if "?" in base_url else "?"
-            dynamic_url = f"{base_url}{separator}t={int(time.time() * 1000)}"
-            _LOG.debug(f"UC firmware compatibility: Adding dynamic timestamp to image URL")
-            return dynamic_url
-        
-        # First time seeing this URL/content - update tracking and use as-is
-        self._last_image_url = base_url
-        self._last_media_title = media_title
-        return base_url
+
+        separator = "&" if "?" in base_url else "?"
+        timestamp = int(time.time() * 1000)
+        dynamic_url = f"{base_url}{separator}t={timestamp}"
+
+        _LOG.debug(f"UC firmware compatibility: Added timestamp {timestamp} to image URL")
+        return dynamic_url
 
     def _start_polling(self):
         if self._polling_task is None or self._polling_task.done():
@@ -314,8 +306,6 @@ class RvolutionMediaPlayer(MediaPlayer):
                 attributes_update[Attributes.MEDIA_TYPE] = ""
                 attributes_update[Attributes.MEDIA_DURATION] = 0
                 attributes_update[Attributes.MEDIA_POSITION] = 0
-                self._last_image_url = ""  # Reset image tracking when not playing
-                self._last_media_title = ""  # Reset title tracking
             
             if is_playing:
                 media = enhanced_status.get('media')
@@ -390,8 +380,6 @@ class RvolutionMediaPlayer(MediaPlayer):
                     attributes_update[Attributes.MEDIA_ALBUM] = ""
                     attributes_update[Attributes.MEDIA_IMAGE_URL] = ""
                     attributes_update[Attributes.MEDIA_TYPE] = ""
-                    self._last_image_url = ""  # Reset image tracking
-                    self._last_media_title = ""  # Reset title tracking
             
             if attributes_update:
                 await self._update_attributes(attributes_update)
