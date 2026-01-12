@@ -99,7 +99,7 @@ class RvolutionMediaPlayer(MediaPlayer):
 
         separator = "&" if "?" in base_url else "?"
         timestamp = int(time.time() * 1000)
-        dynamic_url = f"{base_url}{separator}t={timestamp}"
+        dynamic_url = f"{base_url}{separator}_t={timestamp}"
 
         _LOG.debug(f"UC firmware compatibility: Added timestamp {timestamp} to image URL")
         return dynamic_url
