@@ -399,29 +399,19 @@ class RvolutionMediaPlayer(MediaPlayer):
             # Update local attributes first
             for key, value in attributes.items():
                 self.attributes[key] = value
-            
-            # For ucapi 0.5.x: Use entity_change event instead of update_attributes
+
+            # Trigger WebSocket broadcast to remote via ucapi
             if self._api and hasattr(self._api, 'configured_entities') and self._api.configured_entities:
                 try:
-                    # Try new ucapi 0.5.x method: entity_change
-                    if hasattr(self._api.configured_entities, 'entity_change'):
-                        self._api.configured_entities.entity_change(self.id, attributes)
-                        _LOG.debug(f"Updated attributes via entity_change for {self.id}")
-                    else:
-                        # Fallback: direct entity object update
-                        entity = self._api.configured_entities.get(self.id)
-                        if entity:
-                            for key, value in attributes.items():
-                                if hasattr(entity, 'attributes'):
-                                    entity.attributes[key] = value
-                            _LOG.debug(f"Updated attributes via direct entity for {self.id}")
-                        else:
-                            _LOG.warning(f"Entity {self.id} not found in configured_entities")
+                    # Use update_attributes() which triggers ENTITY_ATTRIBUTES_UPDATED event
+                    # This broadcasts the update to all connected WebSocket clients (remotes)
+                    self._api.configured_entities.update_attributes(self.id, self.attributes)
+                    _LOG.debug(f"Broadcast attributes update for {self.id}: {list(attributes.keys())}")
                 except Exception as update_error:
-                    _LOG.debug(f"Could not update via API (continuing with local update): {update_error}")
-            
-            _LOG.debug(f"Updated attributes for media player {self.id}: {list(attributes.keys())}")
-            
+                    _LOG.warning(f"Failed to broadcast attribute update for {self.id}: {update_error}")
+            else:
+                _LOG.warning(f"Cannot broadcast updates - API not initialized for {self.id}")
+
         except Exception as e:
             _LOG.error(f"Failed to update attributes for media player {self.id}: {e}")
 
