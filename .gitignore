@@ -87,6 +87,10 @@ Thumbs.db
 # Integration specific
 artifacts/
 
+# Testing / simulator files (local only, never push)
+tests/
+simulator/
+
 # Ai Tools
 Claude/
 .claude/

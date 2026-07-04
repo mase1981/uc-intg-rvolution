@@ -32,15 +32,21 @@ Your support helps maintain this integration. Thank you! ❤️
 
 ### 📺 **Multi-Device Support**
 
-- **Multi-Device Setup** - Configure up to 10 R_volution devices in a single integration
+- **Multi-Device Setup** - Configure multiple R_volution devices in a single integration
 - **Device Type Support** - Supports both Amlogic (PlayerOne 8K, Pro 8K, Mini) and R_volution Player devices
 - **Smart Naming** - Automatic entity naming using real device information from API
 - **Port Configuration** - Flexible port configuration for different device setups
 
 #### **Per-Device Entities**
-Each R_volution device creates two entities:
-- **Media Player Entity**: `[Device Name] (Device Type)` - Media playback control with status display
-- **Remote Entity**: `[Device Name] Remote (Device Type)` - Full remote control with on-screen interface
+Each R_volution device creates six entities:
+- **Media Player Entity** - Media playback control with now-playing status (title, artwork, position)
+- **Remote Entity** - Full IR remote with three on-screen UI pages and physical-button mapping
+- **Power Switch** - Discrete on/off/toggle power control
+- **Quick Launch Select** - Jump to Home, Explorer, R_video (Amlogic) or Menu
+- **Playback Sensor** - Current playback state (Playing / Paused / Idle / Off)
+- **Now Playing Sensor** - Title of the currently playing media
+
+> **Upgrading from v2.x → v3.0.0:** This release is a full rewrite on the ucapi-framework and changes the entity ID format (e.g. `mp_<id>` → `media_player.<id>`). After upgrading, re-add the R_volution entities to any activities or pages that referenced the old ones. Existing device configuration is preserved.
 
 ### 🎮 **Remote Control Functionality**
 
@@ -187,24 +193,15 @@ docker run -d --name uc-rvolution --restart unless-stopped --network host -v rvo
 2. The R_volution integration should appear in **Available Integrations**
 3. Click **"Configure"** to begin setup:
 
-#### **Device Count Selection:**
-- Choose number of R_volution devices to configure (1-10)
-
 #### **Device Configuration:**
-For each device:
-- **Device IP Address**: R_volution device IP (e.g., 192.168.1.100 or 192.168.1.100:8080)
 - **Device Name**: Location-based name (e.g., "Living Room R_volution", "Kitchen PlayerOne")
+- **IP Address**: R_volution device IP (e.g., 192.168.1.100)
 - **Device Type**: Select Amlogic (PlayerOne 8K, Pro 8K, Mini) or R_volution Player
-- Click **Complete Setup**
+
+To add more devices, run the integration setup again and choose **"Add a new device"** in configuration mode. Each device can be updated or removed from the same screen.
 
 #### **Connection Test:**
-- Integration verifies device connectivity
-- Tests HTTP API access
-- Setup fails if device unreachable
-
-4. Integration will create entities for each device:
-   - **Media Player**: `[Device Name] (Device Type)`
-   - **Remote**: `[Device Name] Remote (Device Type)`
+- The integration verifies reachability with a lightweight TCP check on port 80 (no on-screen command is ever sent to the device). Setup fails only if the device is unreachable.
 
 ## Using the Integration
 

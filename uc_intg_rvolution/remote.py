@@ -1,265 +1,159 @@
 """
-R_volution Remote entity implementation with comprehensive button support.
+R_volution remote entity.
 
-:copyright: (c) 2025 by Meir Miyara
+Exposes the full IR command set as simple commands plus a physical-button mapping
+and on-screen UI pages.
+
+:copyright: (c) 2025 by Meir Miyara.
 :license: MPL-2.0, see LICENSE for more details.
 """
 
 import logging
 from typing import Any
 
-import ucapi
-from ucapi import StatusCodes
-from ucapi.remote import Attributes, Commands, Features, States
-from ucapi.ui import DeviceButtonMapping, EntityCommand, UiPage, create_ui_text, create_ui_icon, Size
+from ucapi import StatusCodes, remote
+from ucapi.ui import Buttons, Size, UiPage, create_btn_mapping, create_ui_icon, create_ui_text
+from ucapi_framework import RemoteEntity
 
-from uc_intg_rvolution.client import RvolutionClient, ConnectionError, CommandError
-from uc_intg_rvolution.config import DeviceConfig, DeviceType
+from uc_intg_rvolution.config import DeviceConfig
+from uc_intg_rvolution.const import DEVICE_TYPE_PLAYER, commands_for
+from uc_intg_rvolution.device import RvolutionDevice
 
 _LOG = logging.getLogger(__name__)
 
 
-class RvolutionRemote(ucapi.Remote):
+class RvolutionRemote(RemoteEntity):
+    """Remote entity for an R_volution device."""
 
-    def __init__(self, client: RvolutionClient, device_config: DeviceConfig, api: ucapi.IntegrationAPI):
-        self._client = client
-        self._device_config = device_config
-        self._api = api
-        self._attr_available = True
-        
-        entity_id = f"remote_{device_config.device_id}"
-        
-        device_type_name = "Amlogic Remote" if device_config.device_type.value == "amlogic" else "R_volution Remote"
-        entity_name = f"{device_config.name} Remote ({device_type_name})"
-        
-        available_commands = client.get_available_commands()
-        
-        simple_commands = [cmd for cmd in available_commands if cmd not in [
-            "Power On", "Power Off"
-        ]]
-        
-        attributes = {
-            Attributes.STATE: States.UNKNOWN
-        }
-        
-        features = [
-            Features.ON_OFF,
-            Features.TOGGLE,
-            Features.SEND_CMD
-        ]
-        
-        ui_pages = self._create_ui_pages(device_config.device_type)
-        
+    def __init__(self, device_config: DeviceConfig, device: RvolutionDevice) -> None:
+        self._device = device
+        entity_id = f"remote.{device_config.identifier}"
+        simple_commands = list(commands_for(device_config.device_type).keys())
+
         super().__init__(
-            identifier=entity_id,
-            name=entity_name,
-            features=features,
-            attributes=attributes,
+            entity_id,
+            device_config.name,
+            [remote.Features.ON_OFF, remote.Features.TOGGLE, remote.Features.SEND_CMD],
+            {remote.Attributes.STATE: remote.States.UNKNOWN},
             simple_commands=simple_commands,
-            ui_pages=ui_pages,
-            cmd_handler=self._cmd_handler
+            button_mapping=self._button_mapping(),
+            ui_pages=self._ui_pages(device_config.device_type),
+            cmd_handler=self._handle_command,
         )
-        
-        _LOG.info(f"Created remote entity: {entity_id} for {device_config.name} with {len(simple_commands)} commands")
+        self.subscribe_to_device(device)
 
-    def _create_ui_pages(self, device_type: DeviceType) -> list[UiPage]:
-        pages = []
-        
-        main_page = UiPage("main", "Main Controls", grid=Size(4, 6))
-        
-        main_page.add(create_ui_text("Power", 0, 0, cmd="Power On"))
-        main_page.add(create_ui_text("Info", 1, 0, cmd="Info"))
-        main_page.add(create_ui_text("Menu", 2, 0, cmd="Menu"))
-        main_page.add(create_ui_text("Home", 3, 0, cmd="Home"))
+    async def sync_state(self) -> None:
+        if self._device.state == "OFF":
+            self.update({remote.Attributes.STATE: remote.States.OFF})
+        else:
+            self.update({remote.Attributes.STATE: remote.States.ON})
 
-        main_page.add(create_ui_icon("uc:up", 1, 1, cmd="Cursor Up"))
-        main_page.add(create_ui_icon("uc:left", 0, 2, cmd="Cursor Left"))
-        main_page.add(create_ui_text("OK", 1, 2, cmd="Cursor Enter"))
-        main_page.add(create_ui_icon("uc:right", 2, 2, cmd="Cursor Right"))
-        main_page.add(create_ui_icon("uc:down", 1, 3, cmd="Cursor Down"))
-        main_page.add(create_ui_text("Back", 3, 2, cmd="Return"))
+    async def _handle_command(
+        self, entity: Any, cmd_id: str, params: dict[str, Any] | None
+    ) -> StatusCodes:
+        try:
+            if cmd_id == remote.Commands.ON:
+                ok = await self._device.power_on()
+            elif cmd_id == remote.Commands.OFF:
+                ok = await self._device.power_off()
+            elif cmd_id == remote.Commands.TOGGLE:
+                ok = await self._device.power_toggle()
+            elif cmd_id == remote.Commands.SEND_CMD:
+                command = (params or {}).get("command", "")
+                ok = await self._device.send_command(command)
+            elif self._device.client and self._device.client.has_command(cmd_id):
+                ok = await self._device.send_command(cmd_id)
+            else:
+                return StatusCodes.NOT_IMPLEMENTED
+            return StatusCodes.OK if ok else StatusCodes.SERVER_ERROR
+        except Exception as err:  # pylint: disable=broad-except
+            _LOG.error("[%s] Command '%s' error: %s", self.id, cmd_id, err)
+            return StatusCodes.SERVER_ERROR
 
-        main_page.add(create_ui_text("Play", 0, 4, cmd="Play/Pause"))
-        main_page.add(create_ui_text("Stop", 1, 4, cmd="Stop"))
-        main_page.add(create_ui_text("Next", 2, 4, cmd="Next"))
-        main_page.add(create_ui_text("Prev", 3, 4, cmd="Previous"))
+    @staticmethod
+    def _button_mapping() -> list:
+        return [
+            create_btn_mapping(Buttons.POWER, short="Power Toggle"),
+            create_btn_mapping(Buttons.HOME, short="Home"),
+            create_btn_mapping(Buttons.BACK, short="Return"),
+            create_btn_mapping(Buttons.MENU, short="Menu"),
+            create_btn_mapping(Buttons.DPAD_UP, short="Cursor Up"),
+            create_btn_mapping(Buttons.DPAD_DOWN, short="Cursor Down"),
+            create_btn_mapping(Buttons.DPAD_LEFT, short="Cursor Left"),
+            create_btn_mapping(Buttons.DPAD_RIGHT, short="Cursor Right"),
+            create_btn_mapping(Buttons.DPAD_MIDDLE, short="Cursor Enter"),
+            create_btn_mapping(Buttons.VOLUME_UP, short="Volume Up"),
+            create_btn_mapping(Buttons.VOLUME_DOWN, short="Volume Down"),
+            create_btn_mapping(Buttons.MUTE, short="Mute"),
+            create_btn_mapping(Buttons.CHANNEL_UP, short="Page Up"),
+            create_btn_mapping(Buttons.CHANNEL_DOWN, short="Page Down"),
+            create_btn_mapping(Buttons.PREV, short="Previous"),
+            create_btn_mapping(Buttons.NEXT, short="Next"),
+            create_btn_mapping(Buttons.PLAY, short="Play/Pause"),
+            create_btn_mapping(Buttons.STOP, short="Stop"),
+        ]
 
-        main_page.add(create_ui_text("Vol+", 0, 5, cmd="Volume Up"))
-        main_page.add(create_ui_text("Vol-", 1, 5, cmd="Volume Down"))
-        main_page.add(create_ui_text("Mute", 2, 5, cmd="Mute"))
-        main_page.add(create_ui_text("FF", 3, 5, cmd="Fast Forward"))
+    @staticmethod
+    def _ui_pages(device_type: str) -> list[UiPage]:
+        main = UiPage("main", "Main Controls", grid=Size(4, 6))
+        main.add(create_ui_text("Power", 0, 0, cmd="Power Toggle"))
+        main.add(create_ui_text("Info", 1, 0, cmd="Info"))
+        main.add(create_ui_text("Menu", 2, 0, cmd="Menu"))
+        main.add(create_ui_text("Home", 3, 0, cmd="Home"))
+        main.add(create_ui_icon("uc:up", 1, 1, cmd="Cursor Up"))
+        main.add(create_ui_icon("uc:left", 0, 2, cmd="Cursor Left"))
+        main.add(create_ui_text("OK", 1, 2, cmd="Cursor Enter"))
+        main.add(create_ui_icon("uc:right", 2, 2, cmd="Cursor Right"))
+        main.add(create_ui_icon("uc:down", 1, 3, cmd="Cursor Down"))
+        main.add(create_ui_text("Back", 3, 2, cmd="Return"))
+        main.add(create_ui_text("Play", 0, 4, cmd="Play/Pause"))
+        main.add(create_ui_text("Stop", 1, 4, cmd="Stop"))
+        main.add(create_ui_text("Prev", 2, 4, cmd="Previous"))
+        main.add(create_ui_text("Next", 3, 4, cmd="Next"))
+        main.add(create_ui_text("Vol+", 0, 5, cmd="Volume Up"))
+        main.add(create_ui_text("Vol-", 1, 5, cmd="Volume Down"))
+        main.add(create_ui_text("Mute", 2, 5, cmd="Mute"))
+        main.add(create_ui_text("FF", 3, 5, cmd="Fast Forward"))
 
-        pages.append(main_page)
-
-        numbers_page = UiPage("numbers", "Numbers & Functions", grid=Size(4, 6))
-        
-        numbers = [
+        numbers = UiPage("numbers", "Numbers & Functions", grid=Size(4, 6))
+        for num, x, y in [
             ("1", 0, 0), ("2", 1, 0), ("3", 2, 0),
             ("4", 0, 1), ("5", 1, 1), ("6", 2, 1),
             ("7", 0, 2), ("8", 1, 2), ("9", 2, 2),
-            ("0", 1, 3)
-        ]
-
-        for num, x, y in numbers:
-            numbers_page.add(create_ui_text(num, x, y, cmd=f"Digit {num}"))
-
-        colors = [
-            ("Red", "Function Red"),
-            ("Green", "Function Green"),
-            ("Yellow", "Function Yellow"),
-            ("Blue", "Function Blue")
-        ]
-        
-        for col_idx, (label, cmd) in enumerate(colors):
-            numbers_page.add(create_ui_text(label, col_idx, 3, cmd=cmd))
-        
-        numbers_page.add(create_ui_text("Page→", 0, 4, cmd="Page Up"))
-        numbers_page.add(create_ui_text("Page↓", 1, 4, cmd="Page Down"))
-        numbers_page.add(create_ui_text("Delete", 2, 4, cmd="Delete"))
-        numbers_page.add(create_ui_text("3D", 3, 4, cmd="3D"))
-        
-        numbers_page.add(create_ui_text("Explorer", 0, 5, cmd="Explorer"))
-        numbers_page.add(create_ui_text("Format", 1, 5, cmd="Format Scroll"))
-        numbers_page.add(create_ui_text("Dimmer", 2, 5, cmd="Dimmer"))
-        if device_type == DeviceType.PLAYER:
-            numbers_page.add(create_ui_text("Mouse", 3, 5, cmd="Mouse"))
+            ("0", 1, 3),
+        ]:
+            numbers.add(create_ui_text(num, x, y, cmd=f"Digit {num}"))
+        for row, (label, cmd) in enumerate(
+            [("Red", "Function Red"), ("Green", "Function Green"),
+             ("Yellow", "Function Yellow"), ("Blue", "Function Blue")]
+        ):
+            numbers.add(create_ui_text(label, 3, row, cmd=cmd))
+        numbers.add(create_ui_text("Page+", 0, 4, cmd="Page Up"))
+        numbers.add(create_ui_text("Page-", 1, 4, cmd="Page Down"))
+        numbers.add(create_ui_text("Delete", 2, 4, cmd="Delete"))
+        numbers.add(create_ui_text("3D", 3, 4, cmd="3D"))
+        numbers.add(create_ui_text("Explorer", 0, 5, cmd="Explorer"))
+        numbers.add(create_ui_text("Format", 1, 5, cmd="Format Scroll"))
+        numbers.add(create_ui_text("Dimmer", 2, 5, cmd="Dimmer"))
+        if device_type == DEVICE_TYPE_PLAYER:
+            numbers.add(create_ui_text("Mouse", 3, 5, cmd="Mouse"))
         else:
-            numbers_page.add(create_ui_text("R_video", 3, 5, cmd="R_video"))
-        
-        pages.append(numbers_page)
-        
-        advanced_page = UiPage("advanced", "Advanced Controls", grid=Size(4, 6))
-        
-        advanced_page.add(create_ui_text("FF", 0, 0, cmd="Fast Forward"))
-        advanced_page.add(create_ui_text("REW", 1, 0, cmd="Fast Reverse"))
-        advanced_page.add(create_ui_text("+10s", 2, 0, cmd="10 sec forward"))
-        advanced_page.add(create_ui_text("-10s", 3, 0, cmd="10 sec rewind"))
-        
-        advanced_page.add(create_ui_text("+60s", 0, 1, cmd="60 sec forward"))
-        advanced_page.add(create_ui_text("-60s", 1, 1, cmd="60 sec rewind"))
-        advanced_page.add(create_ui_text("Audio", 2, 1, cmd="Audio"))
-        advanced_page.add(create_ui_text("Subtitle", 3, 1, cmd="Subtitle"))
-        
-        advanced_page.add(create_ui_text("Repeat", 0, 2, cmd="Repeat"))
-        advanced_page.add(create_ui_text("Zoom", 1, 2, cmd="Zoom"))
-        advanced_page.add(create_ui_text("Toggle", 2, 2, cmd="Power Toggle"))
-        
-        if device_type == DeviceType.PLAYER and "HDMI/XMOS Audio Toggle" in self._client.get_available_commands():
-            advanced_page.add(create_ui_text("HDMI/XMOS", 3, 2, cmd="HDMI/XMOS Audio Toggle"))
-        
-        pages.append(advanced_page)
-        
-        return pages
+            numbers.add(create_ui_text("R_video", 3, 5, cmd="R_video"))
 
-    async def _cmd_handler(self, entity: ucapi.Entity, cmd_id: str, params: dict[str, Any] | None) -> StatusCodes:
-        _LOG.debug(f"Remote {self.id} received command: {cmd_id} with params: {params}")
-        
-        try:
-            if cmd_id == Commands.ON:
-                success = await self._client.power_on()
-                if success:
-                    await self._update_attributes({Attributes.STATE: States.ON})
-                return StatusCodes.OK if success else StatusCodes.SERVER_ERROR
-            
-            elif cmd_id == Commands.OFF:
-                success = await self._client.power_off()
-                if success:
-                    await self._update_attributes({Attributes.STATE: States.OFF})
-                return StatusCodes.OK if success else StatusCodes.SERVER_ERROR
-            
-            elif cmd_id == Commands.TOGGLE:
-                success = await self._client.power_toggle()
-                if success:
-                    current_state = self.attributes.get(Attributes.STATE, States.UNKNOWN)
-                    new_state = States.OFF if current_state == States.ON else States.ON
-                    await self._update_attributes({Attributes.STATE: new_state})
-                return StatusCodes.OK if success else StatusCodes.SERVER_ERROR
-            
-            elif cmd_id == Commands.SEND_CMD:
-                if not params or "command" not in params:
-                    _LOG.warning(f"SEND_CMD missing command parameter for remote {self.id}")
-                    return StatusCodes.BAD_REQUEST
-                
-                command = params["command"]
-                success = await self._client.send_ir_command(command)
-                return StatusCodes.OK if success else StatusCodes.SERVER_ERROR
-            
-            elif cmd_id in self._client.get_available_commands():
-                success = await self._client.send_ir_command(cmd_id)
-                return StatusCodes.OK if success else StatusCodes.SERVER_ERROR
-            
-            else:
-                _LOG.warning(f"Unknown command for remote {self.id}: {cmd_id}")
-                return StatusCodes.NOT_IMPLEMENTED
-                
-        except ConnectionError as e:
-            _LOG.error(f"Connection error for remote {self.id}: {e}")
-            await self._update_attributes({Attributes.STATE: States.UNAVAILABLE})
-            return StatusCodes.SERVICE_UNAVAILABLE
-        
-        except CommandError as e:
-            _LOG.error(f"Command error for remote {self.id}: {e}")
-            return StatusCodes.BAD_REQUEST
-        
-        except Exception as e:
-            _LOG.error(f"Unexpected error for remote {self.id}: {e}")
-            return StatusCodes.SERVER_ERROR
+        advanced = UiPage("advanced", "Advanced Controls", grid=Size(4, 6))
+        advanced.add(create_ui_text("FF", 0, 0, cmd="Fast Forward"))
+        advanced.add(create_ui_text("REW", 1, 0, cmd="Fast Reverse"))
+        advanced.add(create_ui_text("+10s", 2, 0, cmd="10 sec forward"))
+        advanced.add(create_ui_text("-10s", 3, 0, cmd="10 sec rewind"))
+        advanced.add(create_ui_text("+60s", 0, 1, cmd="60 sec forward"))
+        advanced.add(create_ui_text("-60s", 1, 1, cmd="60 sec rewind"))
+        advanced.add(create_ui_text("Audio", 2, 1, cmd="Audio"))
+        advanced.add(create_ui_text("Subtitle", 3, 1, cmd="Subtitle"))
+        advanced.add(create_ui_text("Repeat", 0, 2, cmd="Repeat"))
+        advanced.add(create_ui_text("Zoom", 1, 2, cmd="Zoom"))
+        advanced.add(create_ui_text("On", 2, 2, cmd="Power On"))
+        advanced.add(create_ui_text("Off", 3, 2, cmd="Power Off"))
+        if device_type == DEVICE_TYPE_PLAYER:
+            advanced.add(create_ui_text("HDMI/XMOS", 0, 3, cmd="HDMI/XMOS Audio Toggle"))
 
-    async def _update_attributes(self, attributes: dict[str, Any]) -> None:
-        try:
-            # Update local attributes first
-            for key, value in attributes.items():
-                self.attributes[key] = value
-            
-            # For ucapi 0.5.x: Use entity_change event instead of update_attributes
-            if self._api and hasattr(self._api, 'configured_entities') and self._api.configured_entities:
-                try:
-                    # Try new ucapi 0.5.x method: entity_change
-                    if hasattr(self._api.configured_entities, 'entity_change'):
-                        self._api.configured_entities.entity_change(self.id, attributes)
-                        _LOG.debug(f"Updated attributes via entity_change for {self.id}")
-                    else:
-                        # Fallback: direct entity object update
-                        entity = self._api.configured_entities.get(self.id)
-                        if entity:
-                            for key, value in attributes.items():
-                                if hasattr(entity, 'attributes'):
-                                    entity.attributes[key] = value
-                            _LOG.debug(f"Updated attributes via direct entity for {self.id}")
-                        else:
-                            _LOG.warning(f"Entity {self.id} not found in configured_entities")
-                except Exception as update_error:
-                    _LOG.debug(f"Could not update via API (continuing with local update): {update_error}")
-            
-            _LOG.debug(f"Updated attributes for remote {self.id}: {attributes}")
-            
-        except Exception as e:
-            _LOG.error(f"Failed to update attributes for remote {self.id}: {e}")
-
-    async def test_connection(self) -> bool:
-        try:
-            success = await self._client.test_connection()
-            if success:
-                await self._update_attributes({Attributes.STATE: States.ON})
-                self._attr_available = True
-            else:
-                await self._update_attributes({Attributes.STATE: States.UNAVAILABLE})
-                self._attr_available = False
-            return success
-        except Exception as e:
-            _LOG.error(f"Connection test failed for remote {self.id}: {e}")
-            await self._update_attributes({Attributes.STATE: States.UNAVAILABLE})
-            self._attr_available = False
-            return False
-
-    async def push_update(self) -> None:
-        _LOG.debug(f"Pushing update for remote {self.id}")
-        await self.test_connection()
-
-    @property
-    def available(self) -> bool:
-        return self._attr_available
-
-    @property
-    def device_config(self) -> DeviceConfig:
-        return self._device_config
+        return [main, numbers, advanced]
