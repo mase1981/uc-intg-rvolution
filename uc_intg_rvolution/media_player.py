@@ -34,6 +34,7 @@ FEATURES = [
     media_player.Features.MEDIA_TYPE,
     media_player.Features.MEDIA_DURATION,
     media_player.Features.MEDIA_POSITION,
+    media_player.Features.REPEAT,
 ]
 
 _COMMAND_MAP = {
@@ -70,6 +71,7 @@ class RvolutionMediaPlayer(MediaPlayerEntity):
                 media_player.Attributes.MEDIA_TYPE: "",
                 media_player.Attributes.MEDIA_DURATION: 0,
                 media_player.Attributes.MEDIA_POSITION: 0,
+                media_player.Attributes.REPEAT: media_player.RepeatMode.OFF,
             },
             device_class=media_player.DeviceClasses.STREAMING_BOX,
             cmd_handler=self._handle_command,
@@ -103,6 +105,13 @@ class RvolutionMediaPlayer(MediaPlayerEntity):
                 ok = await self._device.power_off()
             elif cmd_id == media_player.Commands.TOGGLE:
                 ok = await self._device.power_toggle()
+            elif cmd_id == media_player.Commands.REPEAT:
+                ok = await self._device.send_command("Repeat")
+                if ok:
+                    mode = (params or {}).get(
+                        media_player.Attributes.REPEAT, media_player.RepeatMode.OFF
+                    )
+                    self.update({media_player.Attributes.REPEAT: mode})
             elif cmd_id in _COMMAND_MAP:
                 ok = await self._device.send_command(_COMMAND_MAP[cmd_id])
             else:
