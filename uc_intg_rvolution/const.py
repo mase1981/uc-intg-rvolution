@@ -57,7 +57,7 @@ AMLOGIC_COMMANDS: dict[str, str] = {
     "Zoom": "E21D4040",
     "Repeat": "B9464040",
     "Page Up": "BF404040",
-    "Page Down": "DB204040",
+    "Page Down": "DF204040",
     "Delete": "F30C4040",
     "Dimmer": "A45B4040",
     "Explorer": "EA164040",
