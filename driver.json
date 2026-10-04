@@ -1,6 +1,6 @@
 {
   "driver_id": "uc_intg_rvolution",
-  "version": "3.0.2",
+  "version": "3.1.0",
   "min_core_api": "0.21.0",
   "name": {
     "en": "R_Volution Players"
@@ -35,5 +35,5 @@
       }
     ]
   },
-  "release_date": "2026-07-04"
+  "release_date": "2026-10-04"
 }

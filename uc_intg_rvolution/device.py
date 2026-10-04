@@ -97,6 +97,9 @@ class RvolutionDevice(PollingDevice):
                 self._reset_media()
                 self._state = "OFF"
                 _LOG.info("[%s] Not reachable at setup, reporting OFF", self.log_id)
+        # Entities follow push_update(); without it they stay UNKNOWN (startup) or
+        # UNAVAILABLE (after the Remote wakes) until the player becomes reachable.
+        self.push_update()
 
     async def poll_device(self) -> None:
         client = self._get_client()

@@ -8,6 +8,7 @@ and on-screen UI pages.
 :license: MPL-2.0, see LICENSE for more details.
 """
 
+import asyncio
 import logging
 from typing import Any
 
@@ -58,10 +59,9 @@ class RvolutionRemote(RemoteEntity):
                 ok = await self._device.power_off()
             elif cmd_id == remote.Commands.TOGGLE:
                 ok = await self._device.power_toggle()
-            elif cmd_id == remote.Commands.SEND_CMD:
-                command = (params or {}).get("command", "")
-                ok = await self._device.send_command(command)
-            elif self._device.client and self._device.client.has_command(cmd_id):
+            elif cmd_id in (remote.Commands.SEND_CMD, remote.Commands.SEND_CMD_SEQUENCE):
+                return await self._send_commands(cmd_id, params or {})
+            elif self._device._get_client().has_command(cmd_id):  # pylint: disable=protected-access
                 ok = await self._device.send_command(cmd_id)
             else:
                 return StatusCodes.NOT_IMPLEMENTED
@@ -69,6 +69,34 @@ class RvolutionRemote(RemoteEntity):
         except Exception as err:  # pylint: disable=broad-except
             _LOG.error("[%s] Command '%s' error: %s", self.id, cmd_id, err)
             return StatusCodes.SERVER_ERROR
+
+    async def _send_commands(self, cmd_id: str, params: dict[str, Any]) -> StatusCodes:
+        """send_cmd (with repeat/delay) and send_cmd_sequence (list or comma separated)."""
+        if cmd_id == remote.Commands.SEND_CMD:
+            commands = [params.get("command", "")]
+        else:
+            commands = params.get("sequence") or []
+            if isinstance(commands, str):
+                commands = commands.split(",")
+        commands = [str(command).strip() for command in commands if str(command).strip()]
+        if not commands:
+            return StatusCodes.BAD_REQUEST
+        client = self._device._get_client()  # pylint: disable=protected-access
+        unknown = [command for command in commands if not client.has_command(command)]
+        if unknown:
+            _LOG.warning("[%s] Unknown command(s): %s", self.id, ", ".join(unknown))
+            return StatusCodes.BAD_REQUEST
+
+        repeat, delay = _repeat_delay(params)
+        first = True
+        for _ in range(repeat):
+            for command in commands:
+                if not first and delay:
+                    await asyncio.sleep(delay)
+                first = False
+                if not await self._device.send_command(command):
+                    return StatusCodes.SERVER_ERROR
+        return StatusCodes.OK
 
     @staticmethod
     def _button_mapping() -> list:
@@ -157,3 +185,16 @@ class RvolutionRemote(RemoteEntity):
             advanced.add(create_ui_text("HDMI/XMOS", 0, 3, cmd="HDMI/XMOS Audio Toggle"))
 
         return [main, numbers, advanced]
+
+
+def _repeat_delay(params: dict[str, Any]) -> tuple[int, float]:
+    """Repeat count (at least 1) and delay in seconds from the command parameters."""
+    try:
+        repeat = max(1, int(params.get("repeat") or 1))
+    except (TypeError, ValueError):
+        repeat = 1
+    try:
+        delay = max(0, int(params.get("delay") or 0)) / 1000
+    except (TypeError, ValueError):
+        delay = 0.0
+    return repeat, delay

@@ -8,7 +8,7 @@ Setup flow for the R_volution integration.
 import logging
 from typing import Any
 
-from ucapi import IntegrationSetupError, RequestUserInput, SetupError
+from ucapi import RequestUserInput, SetupError
 from ucapi_framework import BaseSetupFlow
 
 from uc_intg_rvolution.client import RvolutionClient
@@ -19,28 +19,45 @@ _LOG = logging.getLogger(__name__)
 
 
 class RvolutionSetupFlow(BaseSetupFlow[DeviceConfig]):
-    """Manual-entry setup flow for R_volution devices."""
+    """Manual-entry setup flow for R_volution devices.
 
-    def get_manual_entry_form(self) -> RequestUserInput:
+    Problems are shown on the form with the typed values kept. Update starts from the
+    saved values and keeps the device ID, so entity IDs and activities stay intact.
+    """
+
+    def get_manual_entry_form(self, error: str = "", values: dict[str, Any] | None = None) -> RequestUserInput:
+        saved = self.selected_config_entry
+        values = values or {}
+
+        def pick(key: str, default: Any) -> Any:
+            if values.get(key) not in (None, ""):
+                return values[key]
+            return getattr(saved, key, default) if saved else default
+
+        problem = [{
+            "id": "error",
+            "label": {"en": "Problem"},
+            "field": {"label": {"value": {"en": error}}},
+        }] if error else []
         return RequestUserInput(
             {"en": "R_volution Device"},
-            [
+            problem + [
                 {
                     "id": "name",
                     "label": {"en": "Device Name"},
-                    "field": {"text": {"value": "R_volution Player"}},
+                    "field": {"text": {"value": pick("name", "R_volution Player")}},
                 },
                 {
                     "id": "host",
                     "label": {"en": "IP Address"},
-                    "field": {"text": {"value": ""}},
+                    "field": {"text": {"value": pick("host", "")}},
                 },
                 {
                     "id": "device_type",
                     "label": {"en": "Device Type"},
                     "field": {
                         "dropdown": {
-                            "value": DEVICE_TYPE_AMLOGIC,
+                            "value": pick("device_type", DEVICE_TYPE_AMLOGIC),
                             "items": [
                                 {
                                     "id": DEVICE_TYPE_AMLOGIC,
@@ -60,12 +77,14 @@ class RvolutionSetupFlow(BaseSetupFlow[DeviceConfig]):
     async def query_device(
         self, input_values: dict[str, Any]
     ) -> DeviceConfig | SetupError | RequestUserInput:
-        host = input_values.get("host", "").strip()
+        saved = self.selected_config_entry
+        host = "".join(str(input_values.get("host") or "").split())
+        values = {**input_values, "host": host}
         if not host:
-            return SetupError(error_type=IntegrationSetupError.OTHER)
+            return self.get_manual_entry_form("Enter the player's IP address.", values)
 
-        device_type = input_values.get("device_type", DEVICE_TYPE_AMLOGIC)
-        name = input_values.get("name", "").strip() or f"R_volution ({host})"
+        device_type = input_values.get("device_type") or DEVICE_TYPE_AMLOGIC
+        name = str(input_values.get("name") or "").strip() or f"R_volution ({host})"
 
         client = RvolutionClient(host, device_type)
         try:
@@ -75,9 +94,14 @@ class RvolutionSetupFlow(BaseSetupFlow[DeviceConfig]):
 
         if not reachable:
             _LOG.error("Cannot reach R_volution device at %s", host)
-            return SetupError(error_type=IntegrationSetupError.CONNECTION_REFUSED)
+            return self.get_manual_entry_form(
+                f"No answer from {host}. Check the IP address and that the player is switched "
+                "on and on the same network as the Remote.",
+                values,
+            )
 
-        identifier = f"rvolution_{host.replace('.', '_')}"
+        # Updating keeps the device ID so entity IDs and activities stay intact.
+        identifier = saved.identifier if saved else f"rvolution_{host.replace('.', '_')}"
         _LOG.info("Configured R_volution device %s (%s) at %s", name, device_type, host)
         return DeviceConfig(
             identifier=identifier,
